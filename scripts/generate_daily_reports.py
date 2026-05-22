@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 
-WORKSPACE = Path(__file__).resolve().parents[1]
+WORKSPACE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 INPUT_ROOT = WORKSPACE / "input"
 OUTPUT_ROOT = WORKSPACE / "output"
 NEW_REFERENCES_ROOT = INPUT_ROOT
@@ -30,6 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--template", type=Path, help="Daily report template docx.")
     parser.add_argument("--output-dir", type=Path, help="Output directory for street daily reports.")
     parser.add_argument("--transfer-doc", type=Path, help="Optional transfer-station daily report .doc/.docx.")
+    parser.add_argument("--garbage-summary-template", type=Path, help="Optional garbage classification daily summary template.")
+    parser.add_argument("--daily-summary-template", type=Path, help="Optional simple daily summary template.")
+    parser.add_argument("--summary-output-dir", type=Path, help="Output directory for generated daily summaries.")
     return parser.parse_args()
 
 
@@ -56,6 +59,14 @@ def newest_xls() -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def resolve_summary_report_date(source: Path, date_value: str | None, split_args, structured: Path):
+    import split_street_daily_reports as split
+
+    if date_value and date_value.strip():
+        return split.parse_report_date(date_value.strip())
+    return split.infer_date_from_filename(source) or split.resolve_report_date(split_args, structured)
+
+
 def generate_reports(
     source: Path | None = None,
     overwrite: bool = False,
@@ -63,9 +74,13 @@ def generate_reports(
     template: Path | None = None,
     output_dir: Path | None = None,
     transfer_doc: Path | None = None,
+    garbage_summary_template: Path | None = None,
+    daily_summary_template: Path | None = None,
+    summary_output_dir: Path | None = None,
 ) -> int:
     import extract_xls_structure as extract
     import split_street_daily_reports as split
+    import generate_daily_summaries as summaries
 
     source = source.resolve() if source else newest_xls()
     if not source.exists():
@@ -124,7 +139,33 @@ def generate_reports(
         + (f" --output-dir {output_dir}" if output_dir else "")
         + (f" --transfer-doc {transfer_doc}" if transfer_doc else "")
     )
-    return split.run_split(split_args)
+    split_code = split.run_split(split_args)
+    if split_code != 0:
+        return split_code
+
+    if garbage_summary_template or daily_summary_template:
+        report_date = resolve_summary_report_date(source, date_value, split_args, structured)
+        reports = split.parse_structured_docx(
+            structured,
+            include_non_street_headings=False,
+        )
+        print(
+            "[run] generate_daily_summaries"
+            + (f" --garbage-summary-template {garbage_summary_template}" if garbage_summary_template else "")
+            + (f" --daily-summary-template {daily_summary_template}" if daily_summary_template else "")
+            + (f" --summary-output-dir {summary_output_dir}" if summary_output_dir else "")
+        )
+        written_summaries = summaries.write_summaries(
+            reports=reports,
+            report_date=report_date,
+            garbage_template=garbage_summary_template,
+            daily_template=daily_summary_template,
+            output_dir=summary_output_dir,
+        )
+        for path in written_summaries:
+            print(f"[ok] summary: {path}")
+
+    return split_code
 
 
 def main() -> int:
@@ -137,6 +178,9 @@ def main() -> int:
             template=args.template,
             output_dir=args.output_dir,
             transfer_doc=args.transfer_doc,
+            garbage_summary_template=args.garbage_summary_template,
+            daily_summary_template=args.daily_summary_template,
+            summary_output_dir=args.summary_output_dir,
         )
     except Exception as exc:
         print(f"[fail] {exc}", file=sys.stderr)

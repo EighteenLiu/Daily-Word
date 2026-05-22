@@ -123,7 +123,7 @@ def require_modules() -> tuple[object, object]:
     try:
         import docx
     except ImportError as exc:
-        raise RuntimeError("Missing dependency: python-docx. Install with: pip install python-docx") from exc
+        raise RuntimeError(f"Missing dependency: python-docx/docx ({exc}). Install with: pip install python-docx") from exc
     return openpyxl, docx
 
 

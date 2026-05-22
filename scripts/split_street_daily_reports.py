@@ -10,7 +10,7 @@ from io import BytesIO
 from pathlib import Path
 
 
-WORKSPACE = Path(__file__).resolve().parents[1]
+WORKSPACE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 INPUT_ROOT = WORKSPACE / "input"
 OUTPUT_ROOT = WORKSPACE / "output"
 REFERENCES_ROOT = INPUT_ROOT
@@ -35,6 +35,10 @@ PLACE_SUBHEADINGS = (
     "\u0031.\u5c0f\u533a\u6574\u4f53\u60c5\u51b5",
     "\u0032.\u6876\u7ad9\u8bbe\u7f6e\u60c5\u51b5",
     "\u0033.\u5c45\u6c11\u6295\u653e\u60c5\u51b5",
+)
+OVERALL_TRAILING_ITEMS = (
+    "\uff08\u0031\uff09\u5c0f\u533a\u5ba3\u4f20\u6c1b\u56f4\uff1a",
+    "\uff08\u0032\uff09\u5c0f\u533a\u516c\u793a\u724c\uff1a",
 )
 TARGET_CATEGORIES = (
     "\u5c45\u4f4f\u5c0f\u533a\u3001\u5e73\u623f\u80e1\u540c",
@@ -252,22 +256,27 @@ def infer_date_from_filename(path: Path) -> ReportDate | None:
     if not match:
         return None
     detected = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    return ReportDate(detected - timedelta(days=1))
+    return ReportDate(detected)
 
 
 def resolve_report_date(args: argparse.Namespace, input_path: Path) -> ReportDate:
     if args.date:
         return parse_report_date(args.date)
 
+    inferred = infer_date_from_filename(input_path)
+    if inferred:
+        return inferred
+
     source_xlsx = args.source_xlsx.resolve() if args.source_xlsx else matching_xlsx_for_docx(input_path)
+    if source_xlsx and source_xlsx.exists():
+        inferred = infer_date_from_filename(source_xlsx)
+        if inferred:
+            return inferred
+
     if source_xlsx and source_xlsx.exists():
         inferred = infer_date_from_xlsx(source_xlsx)
         if inferred:
             return inferred
-
-    inferred = infer_date_from_filename(input_path)
-    if inferred:
-        return inferred
 
     raise RuntimeError("Could not infer report date. Pass --date 5.17 or --date 2026-05-17.")
 
@@ -667,6 +676,19 @@ def add_problem_summary_paragraph(document, texts: list[str]) -> None:
         problem_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
 
 
+def add_body_paragraph(document, text: str) -> None:
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    paragraph = document.add_paragraph()
+    if STYLE_BODY in [style.name for style in document.styles]:
+        paragraph.style = STYLE_BODY
+    run = paragraph.add_run(text)
+    run.font.name = CN_FANGSONG
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), CN_FANGSONG)
+    run.font.size = Pt(14)
+
+
 def add_place_overall_content(document, blocks: list[ContentBlock]) -> None:
     all_images: list[ImageBlob] = []
     problem_texts: list[str] = []
@@ -676,6 +698,8 @@ def add_place_overall_content(document, blocks: list[ContentBlock]) -> None:
         all_images.extend(block.images)
     add_problem_summary_paragraph(document, problem_texts)
     add_images(document, all_images)
+    for item in OVERALL_TRAILING_ITEMS:
+        add_body_paragraph(document, item)
 
 
 def write_report(
