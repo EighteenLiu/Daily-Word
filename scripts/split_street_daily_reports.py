@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import hashlib
@@ -36,16 +36,13 @@ PLACE_SUBHEADINGS = (
     "\u0032.\u6876\u7ad9\u8bbe\u7f6e\u60c5\u51b5",
     "\u0033.\u5c45\u6c11\u6295\u653e\u60c5\u51b5",
 )
-OVERALL_TRAILING_ITEMS = (
-    "\uff08\u0031\uff09\u5c0f\u533a\u5ba3\u4f20\u6c1b\u56f4\uff1a",
-    "\uff08\u0032\uff09\u5c0f\u533a\u516c\u793a\u724c\uff1a",
-)
+CN_TRANSFER_STATION = "\u4e2d\u8f6c\u7ad9"
+
 TARGET_CATEGORIES = (
     "\u5c45\u4f4f\u5c0f\u533a\u3001\u5e73\u623f\u80e1\u540c",
     "\u9910\u996e\u5355\u4f4d",
     "\u793e\u4f1a\u5355\u4f4d",
 )
-CN_TRANSFER_STATION = "\u4e2d\u8f6c\u7ad9"
 
 
 @dataclass
@@ -281,12 +278,35 @@ def resolve_report_date(args: argparse.Namespace, input_path: Path) -> ReportDat
     raise RuntimeError("Could not infer report date. Pass --date 5.17 or --date 2026-05-17.")
 
 
+def transfer_date_tokens(report_date: ReportDate) -> tuple[str, ...]:
+    return (
+        f"{report_date.value.month}\u6708{report_date.value.day}\u65e5",
+        f"{report_date.value.month}.{report_date.value.day}",
+        f"{report_date.value.month}-{report_date.value.day}",
+        f"{report_date.value.month}_{report_date.value.day}",
+        report_date.value.strftime("%Y%m%d"),
+        report_date.value.strftime("%Y-%m-%d"),
+    )
+
+
+def transfer_doc_matches_report_date(path: Path, report_date: ReportDate) -> bool:
+    return any(token in path.name for token in transfer_date_tokens(report_date))
+
+
 def find_transfer_doc(report_date: ReportDate, explicit: Path | None = None) -> Path | None:
     if explicit:
         path = explicit.resolve()
-        return path if path.exists() else None
+        if not path.exists():
+            return None
+        if not transfer_doc_matches_report_date(path, report_date):
+            print(
+                f"[skip] transfer_doc date mismatch: {path.name} "
+                f"(expected {report_date.value.month}\u6708{report_date.value.day}\u65e5)"
+            )
+            return None
+        return path
 
-    date_token = f"{report_date.value.month}\u6708{report_date.value.day}\u65e5"
+    date_tokens = transfer_date_tokens(report_date)
     search_roots = [
         INPUT_ROOT,
         INPUT_ROOT / "references",
@@ -301,7 +321,7 @@ def find_transfer_doc(report_date: ReportDate, explicit: Path | None = None) -> 
             for path in root.glob(suffix):
                 if path.name.startswith("~$"):
                     continue
-                if CN_TRANSFER_STATION in path.name and date_token in path.name:
+                if CN_TRANSFER_STATION in path.name and any(token in path.name for token in date_tokens):
                     candidates.append(path)
     if candidates:
         return max(candidates, key=lambda path: path.stat().st_mtime)
@@ -601,14 +621,22 @@ def add_images(document, images: list[ImageBlob]) -> None:
         return
 
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm, Emu, Pt
+    from PIL import Image
 
-    for image in images:
-        paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = paragraph.add_run()
-        image_width, image_height = image_display_size(image)
-        add_raw_picture_from_blob(run, image, image_width, image_height)
-
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    run = paragraph.add_run()
+    for idx, image in enumerate(images):
+        with Image.open(BytesIO(image.blob)) as pil_img:
+            w, h = pil_img.size
+        img_width = int(Cm(10.2))
+        img_height = Emu(int(int(img_width) * h / w))
+        add_raw_picture_from_blob(run, image, img_width, img_height)
+        if idx < len(images) - 1:
+            run.add_text("  ")
 
 def add_section_heading(document, text: str, level: int) -> None:
     from docx.oxml import OxmlElement
@@ -690,17 +718,57 @@ def add_body_paragraph(document, text: str) -> None:
 
 
 def add_place_overall_content(document, blocks: list[ContentBlock]) -> None:
-    all_images: list[ImageBlob] = []
-    problem_texts: list[str] = []
-    for block in blocks:
-        if block.text:
-            problem_texts.append(block.text)
-        all_images.extend(block.images)
-    add_problem_summary_paragraph(document, problem_texts)
-    add_images(document, all_images)
-    for item in OVERALL_TRAILING_ITEMS:
-        add_body_paragraph(document, item)
+    import re
 
+    CN_PROMO = "\u5c0f\u533a\u5ba3\u4f20\u6c1b\u56f4"
+    CN_NOTICE = "\u5c0f\u533a\u516c\u793a\u724c"
+    CN_ATMOSPHERE = "\u5ba3\u4f20\u6c1b\u56f4"
+    NO_PROBLEM_PREFIXES = (
+        "\u65e0\u95ee\u9898",
+        "\u65e0",
+        "\u672a\u53d1\u73b0\u95ee\u9898",
+        "\u672a\u89c1\u95ee\u9898",
+        "\u672a\u89c1\u660e\u663e\u95ee\u9898",
+    )
+
+    problem_texts: list[str] = []
+    label_blocks: list[tuple[str, list[ImageBlob]]] = []
+    problem_images: list[ImageBlob] = []
+
+    for block in blocks:
+        text = block.text.strip() if block.text else ""
+        cleaned = re.sub(r"^[\uff08(]\d+[\uff09)]\s*", "", text) if text else ""
+
+        if CN_PROMO in cleaned or CN_NOTICE in cleaned or CN_ATMOSPHERE in cleaned:
+            label_blocks.append((cleaned, block.images))
+        elif cleaned:
+            problem_texts.append(cleaned)
+            if block.images:
+                problem_images.extend(block.images)
+        else:
+            # Image-only block (no meaningful text)
+            if block.images:
+                problem_images.extend(block.images)
+
+    real_problems = [
+        t
+        for t in problem_texts
+        if t and not any(t.strip().startswith(prefix) for prefix in NO_PROBLEM_PREFIXES)
+    ]
+    if real_problems:
+        add_problem_summary_paragraph(document, problem_texts)
+    elif problem_texts:
+        add_problem_summary_paragraph(document, ["\u65e0\u95ee\u9898"])
+    elif not label_blocks:
+        add_problem_summary_paragraph(document, ["\u65e0\u95ee\u9898"])
+
+    if problem_images:
+        add_images(document, problem_images)
+
+    for label_text, images in label_blocks:
+        add_body_paragraph(document, label_text)
+        if images:
+            add_images(document, images)
 
 def write_report(
     output_path: Path,
@@ -799,3 +867,5 @@ def run_split(args: argparse.Namespace) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

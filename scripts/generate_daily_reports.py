@@ -78,9 +78,26 @@ def generate_reports(
     daily_summary_template: Path | None = None,
     summary_output_dir: Path | None = None,
 ) -> int:
-    import extract_xls_structure as extract
-    import split_street_daily_reports as split
-    import generate_daily_summaries as summaries
+    try:
+        import extract_xls_structure as extract
+        import generate_daily_summaries as summaries
+        import split_street_daily_reports as split
+        from daily_report_builder import build_street_report, load_ledger_rows
+        from daily_report_renderer import (
+            render_street_report_docx,
+            render_street_report_docx_from_docxtpl,
+        )
+        from generate_rule_based_daily_report import has_jinja_tags
+    except ModuleNotFoundError:
+        from scripts import extract_xls_structure as extract
+        from scripts import generate_daily_summaries as summaries
+        from scripts import split_street_daily_reports as split
+        from scripts.daily_report_builder import build_street_report, load_ledger_rows
+        from scripts.daily_report_renderer import (
+            render_street_report_docx,
+            render_street_report_docx_from_docxtpl,
+        )
+        from scripts.generate_rule_based_daily_report import has_jinja_tags
 
     source = source.resolve() if source else newest_xls()
     if not source.exists():
@@ -131,20 +148,56 @@ def generate_reports(
         overwrite=overwrite,
         include_non_street_headings=False,
     )
-    print(
-        "[run] split_street_daily_reports "
-        f"{structured}"
-        + (" --overwrite" if overwrite else "")
-        + (f" --template {split_args.template}" if split_args.template else "")
-        + (f" --output-dir {output_dir}" if output_dir else "")
-        + (f" --transfer-doc {transfer_doc}" if transfer_doc else "")
+    effective_template = split_args.template
+    report_date = split.resolve_report_date(split_args, structured)
+    street_output_dir = (
+        output_dir.resolve()
+        if output_dir
+        else OUTPUT_ROOT / f"{split.CN_REPORT_DIR}\uff08{report_date.short}\uff09"
     )
-    split_code = split.run_split(split_args)
-    if split_code != 0:
-        return split_code
+    print(
+        "[run] rule_based_street_daily_reports "
+        f"{xlsx_path}"
+        + (" --overwrite" if overwrite else "")
+        + (f" --template {effective_template}" if effective_template else "")
+        + (f" --output-dir {output_dir}" if output_dir else "")
+    )
+    rows = load_ledger_rows(xlsx_path, include_images=True)
+    streets = _ordered_streets(rows)
+    effective_template = (
+        split.convert_template_to_docx(effective_template.resolve())
+        if effective_template and effective_template.exists()
+        else effective_template
+    )
+    use_jinja_template = bool(effective_template and effective_template.exists() and has_jinja_tags(effective_template))
+    written = 0
+    for street in streets:
+        report = build_street_report(rows, street)
+        if not any((report.communities, report.restaurants, report.social_units)):
+            continue
+        filename = f"{report_date.short}{split.CN_DISTRICT}{split.short_street_name(street)}{split.CN_CHECK_REPORT}.docx"
+        output_path = street_output_dir / split.safe_filename(filename)
+        if output_path.exists() and not overwrite:
+            print(f"[skip] exists: {output_path}")
+            continue
+        if use_jinja_template:
+            render_street_report_docx_from_docxtpl(
+                report=report,
+                template_path=effective_template,
+                output_path=output_path,
+                report_title=f"{report_date.short}区级{split.short_street_name(street)}检查日报",
+                report_date_text=report_date.chinese,
+            )
+        else:
+            render_street_report_docx(report, output_path)
+        written += 1
+        print(f"[ok] {street} -> {output_path}")
+
+    print(f"[ok] date: {report_date.short}")
+    print(f"[ok] output_dir: {street_output_dir}")
+    print(f"[ok] streets: {len(streets)}, written: {written}")
 
     if garbage_summary_template or daily_summary_template:
-        report_date = resolve_summary_report_date(source, date_value, split_args, structured)
         reports = split.parse_structured_docx(
             structured,
             include_non_street_headings=False,
@@ -165,7 +218,19 @@ def generate_reports(
         for path in written_summaries:
             print(f"[ok] summary: {path}")
 
-    return split_code
+    return 0
+
+
+def _ordered_streets(rows) -> list[str]:
+    streets: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        street = row.street.strip()
+        if not street or street in seen:
+            continue
+        seen.add(street)
+        streets.append(street)
+    return streets
 
 
 def main() -> int:

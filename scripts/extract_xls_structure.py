@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import bisect
@@ -419,22 +419,21 @@ def add_problem_images(document, image_paths: list[Path]) -> None:
         return
 
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
 
-    page_width = document.sections[0].page_width
-    left_margin = document.sections[0].left_margin
-    right_margin = document.sections[0].right_margin
-    usable_width = page_width - left_margin - right_margin
-    image_width = int(usable_width / 3 * 0.92)
-
-    for start in range(0, len(image_paths), 3):
-        group = image_paths[start:start + 3]
-        paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        for image_path in group:
-            run = paragraph.add_run()
-            add_raw_picture(run, image_path, image_width)
-            run.add_text(" ")
-
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    run = paragraph.add_run()
+    for idx, image_path in enumerate(image_paths):
+        page_width = document.sections[0].page_width
+        left_margin = document.sections[0].left_margin
+        right_margin = document.sections[0].right_margin
+        usable_width = page_width - left_margin - right_margin
+        add_raw_picture(run, image_path, int(usable_width * 0.95))
+        if idx < len(image_paths) - 1:
+            run.add_text("  ")
 
 def add_raw_picture(run, image_path: Path, width) -> None:
     from docx.oxml.shape import CT_Inline
