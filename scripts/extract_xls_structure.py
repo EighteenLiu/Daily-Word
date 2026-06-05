@@ -37,6 +37,7 @@ CN_SHEET = "\u5de5\u4f5c\u8868"
 CN_UNFILLED = "\u672a\u586b\u5199"
 CN_OUTPUT_SUFFIX = "\u7ed3\u6784\u5316\u63d0\u53d6"
 CN_QR_CODE = "\u4e8c\u7ef4\u7801"
+CN_PROBLEM_PHOTO = "\u95ee\u9898\u7167\u7247"
 
 
 @dataclass
@@ -213,6 +214,7 @@ def extract_images_from_xlsx(
         sheet_path = sheets.get(sheet_name)
         if not sheet_path:
             return images
+        image_columns = image_columns_for_sheet(archive, sheet_path)
 
         sheet_rels_path = f"{Path(sheet_path).parent.as_posix()}/_rels/{Path(sheet_path).name}.rels"
         sheet_rels = read_relationships(archive, sheet_rels_path)
@@ -243,6 +245,8 @@ def extract_images_from_xlsx(
                 if row_node is None or col_node is None or not rel_id:
                     continue
                 col = int(col_node.text or "0") + 1
+                if col not in image_columns:
+                    continue
                 if col in ignored_columns:
                     continue
                 media_target = drawing_rels.get(rel_id)
@@ -263,6 +267,85 @@ def extract_images_from_xlsx(
                 )
 
     return sorted(images, key=lambda item: (item.row, item.col, item.media_name))
+
+
+def image_columns_for_sheet(archive: zipfile.ZipFile, sheet_path: str) -> set[int]:
+    shared_strings = shared_strings_for_archive(archive)
+    sheet_root = ET.fromstring(archive.read(sheet_path))
+    matches: set[int] = set()
+    for cell in sheet_root.findall(".//main:sheetData/main:row[@r='1']/main:c", NS):
+        value = normalize_header(cell_text(cell, shared_strings))
+        if value != CN_PROBLEM_PHOTO:
+            continue
+        column = column_index_from_cell_ref(cell.attrib.get("r", ""))
+        if column:
+            matches.add(column)
+    if not matches:
+        return set(range(1, 10_000))
+
+    columns = set(matches)
+    merge_cells = sheet_root.find("main:mergeCells", NS)
+    if merge_cells is not None:
+        for merge_cell in merge_cells.findall("main:mergeCell", NS):
+            bounds = merge_bounds(merge_cell.attrib.get("ref", ""))
+            if not bounds:
+                continue
+            min_col, min_row, max_col, max_row = bounds
+            if min_row <= 1 <= max_row and any(min_col <= column <= max_col for column in matches):
+                columns.update(range(min_col, max_col + 1))
+    return columns
+
+
+def shared_strings_for_archive(archive: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in archive.namelist():
+        return []
+    root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+    return ["".join(text.text or "" for text in si.findall(".//main:t", NS)) for si in root.findall("main:si", NS)]
+
+
+def cell_text(cell: ET.Element, shared_strings: list[str]) -> str:
+    cell_type = cell.attrib.get("t")
+    if cell_type == "inlineStr":
+        return "".join(text.text or "" for text in cell.findall(".//main:t", NS))
+    value = cell.find("main:v", NS)
+    if value is None or value.text is None:
+        return ""
+    if cell_type == "s":
+        try:
+            return shared_strings[int(value.text)]
+        except (ValueError, IndexError):
+            return ""
+    return value.text
+
+
+def merge_bounds(ref: str) -> tuple[int, int, int, int] | None:
+    if ":" not in ref:
+        return None
+    start, end = ref.split(":", 1)
+    start_col, start_row = cell_coordinate(start)
+    end_col, end_row = cell_coordinate(end)
+    if not all((start_col, start_row, end_col, end_row)):
+        return None
+    return start_col, start_row, end_col, end_row
+
+
+def cell_coordinate(ref: str) -> tuple[int, int]:
+    match = re.fullmatch(r"([A-Z]+)(\d+)", ref.upper())
+    if not match:
+        return 0, 0
+    return column_index_from_letters(match.group(1)), int(match.group(2))
+
+
+def column_index_from_cell_ref(ref: str) -> int:
+    match = re.match(r"([A-Z]+)", ref.upper())
+    return column_index_from_letters(match.group(1)) if match else 0
+
+
+def column_index_from_letters(letters: str) -> int:
+    value = 0
+    for char in letters:
+        value = value * 26 + ord(char) - ord("A") + 1
+    return value
 
 
 def nearest_data_row(image_row: int, data_rows: list[int]) -> int | None:

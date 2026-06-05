@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,6 +12,9 @@ XLSX_FILE_FORMAT = 51
 MSO_AUTOMATION_SECURITY_FORCE_DISABLE = 3
 PICTURE_COMPRESSION_VALUE = "AutomaticPictureCompressionDefault"
 OFFICE_VERSIONS = ("12.0", "14.0", "15.0", "16.0")
+RPC_E_CALL_REJECTED = -2147418111
+EXCEL_COM_RETRY_ATTEMPTS = 8
+EXCEL_COM_RETRY_DELAY_SECONDS = 1.5
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,6 +154,37 @@ def embedded_media_summary(xlsx_path: Path) -> tuple[int, int]:
     return len(media_files), sum(info.file_size for info in media_files)
 
 
+def is_excel_call_rejected(exc: Exception) -> bool:
+    return bool(getattr(exc, "args", ())) and getattr(exc, "args", ())[0] == RPC_E_CALL_REJECTED
+
+
+def call_excel_with_retry(action: str, func):
+    last_exc: Exception | None = None
+    for attempt in range(1, EXCEL_COM_RETRY_ATTEMPTS + 1):
+        try:
+            return func()
+        except Exception as exc:
+            if not is_excel_call_rejected(exc):
+                raise
+            last_exc = exc
+            print(
+                f"[wait] Excel 正忙，正在重试 {action} "
+                f"({attempt}/{EXCEL_COM_RETRY_ATTEMPTS})...",
+                file=sys.stderr,
+            )
+            try:
+                import pythoncom
+
+                pythoncom.PumpWaitingMessages()
+            except Exception:
+                pass
+            time.sleep(EXCEL_COM_RETRY_DELAY_SECONDS)
+    raise RuntimeError(
+        "Excel 一直拒绝接收自动化调用。请关闭所有 Excel 窗口、弹窗和保护视图后重试；"
+        "也可以手动打开该 .xls，另存为 .xlsx 后再选择 .xlsx 台账。"
+    ) from last_exc
+
+
 def convert_with_excel(
     jobs: list[tuple[Path, Path]],
     overwrite: bool,
@@ -196,20 +231,26 @@ def convert_with_excel(
             workbook = None
             destination.parent.mkdir(parents=True, exist_ok=True)
             try:
-                workbook = excel.Workbooks.Open(
-                    Filename=str(source),
-                    UpdateLinks=0,
-                    ReadOnly=True,
-                    AddToMru=False,
-                    IgnoreReadOnlyRecommended=True,
+                workbook = call_excel_with_retry(
+                    f"打开 {source.name}",
+                    lambda: excel.Workbooks.Open(
+                        Filename=str(source),
+                        UpdateLinks=0,
+                        ReadOnly=True,
+                        AddToMru=False,
+                        IgnoreReadOnlyRecommended=True,
+                    ),
                 )
                 workbook.CheckCompatibility = False
                 set_workbook_no_picture_compression(workbook)
-                workbook.SaveAs(
-                    Filename=str(destination),
-                    FileFormat=XLSX_FILE_FORMAT,
-                    CreateBackup=False,
-                    Local=True,
+                call_excel_with_retry(
+                    f"保存 {destination.name}",
+                    lambda: workbook.SaveAs(
+                        Filename=str(destination),
+                        FileFormat=XLSX_FILE_FORMAT,
+                        CreateBackup=False,
+                        Local=True,
+                    ),
                 )
                 if verify_media:
                     count, total_size = embedded_media_summary(destination)

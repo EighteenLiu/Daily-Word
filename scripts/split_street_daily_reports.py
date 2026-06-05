@@ -248,6 +248,79 @@ def infer_date_from_xlsx(xlsx_path: Path) -> ReportDate | None:
     return None
 
 
+def infer_latest_date_from_xlsx(xlsx_path: Path) -> ReportDate | None:
+    try:
+        import openpyxl
+    except ImportError:
+        return None
+
+    dates: list[date] = []
+    workbook = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+    try:
+        sheet = workbook[workbook.sheetnames[0]]
+        date_columns = date_related_columns(sheet)
+        for row_index, row in enumerate(sheet.iter_rows(), start=1):
+            for column_index, cell in enumerate(row, start=1):
+                allow_short = row_index <= 5 or column_index in date_columns
+                dates.extend(dates_from_cell_value(cell.value, allow_short_dates=allow_short))
+    finally:
+        workbook.close()
+    return ReportDate(max(dates)) if dates else None
+
+
+def date_related_columns(sheet) -> set[int]:
+    columns: set[int] = set()
+    keywords = ("日期", "时间", "编号", "案件上报时间", "创建时间")
+    max_row = min(sheet.max_row, 2)
+    for row in range(1, max_row + 1):
+        for col in range(1, sheet.max_column + 1):
+            header = str(sheet.cell(row, col).value or "")
+            if any(keyword in header for keyword in keywords):
+                columns.add(col)
+    return columns
+
+
+def dates_from_cell_value(value: object, allow_short_dates: bool = True) -> list[date]:
+    if value is None:
+        return []
+    if isinstance(value, datetime):
+        return [value.date()]
+    if isinstance(value, date):
+        return [value]
+
+    text = str(value)
+    dates: list[date] = []
+    patterns = (
+        r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})",
+        r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)",
+        r"(?<!\d)(20\d{2})(\d{2})(\d{2})\d+",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            parsed = _safe_date(match.group(1), match.group(2), match.group(3))
+            if parsed:
+                dates.append(parsed)
+
+    current_year = datetime.now().year
+    if allow_short_dates:
+        for match in re.finditer(r"(?<!\d)(\d{1,2})月(\d{1,2})日", text):
+            parsed = _safe_date(str(current_year), match.group(1), match.group(2))
+            if parsed:
+                dates.append(parsed)
+        for match in re.finditer(r"(?<!\d)(\d{1,2})[.．](\d{1,2})(?!\d)", text):
+            parsed = _safe_date(str(current_year), match.group(1), match.group(2))
+            if parsed:
+                dates.append(parsed)
+    return dates
+
+
+def _safe_date(year: str, month: str, day: str) -> date | None:
+    try:
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+
+
 def infer_date_from_filename(path: Path) -> ReportDate | None:
     match = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", path.name)
     if not match:
@@ -260,11 +333,16 @@ def resolve_report_date(args: argparse.Namespace, input_path: Path) -> ReportDat
     if args.date:
         return parse_report_date(args.date)
 
+    source_xlsx = args.source_xlsx.resolve() if args.source_xlsx else matching_xlsx_for_docx(input_path)
+    if source_xlsx and source_xlsx.exists():
+        inferred = infer_latest_date_from_xlsx(source_xlsx)
+        if inferred:
+            return inferred
+
     inferred = infer_date_from_filename(input_path)
     if inferred:
         return inferred
 
-    source_xlsx = args.source_xlsx.resolve() if args.source_xlsx else matching_xlsx_for_docx(input_path)
     if source_xlsx and source_xlsx.exists():
         inferred = infer_date_from_filename(source_xlsx)
         if inferred:
