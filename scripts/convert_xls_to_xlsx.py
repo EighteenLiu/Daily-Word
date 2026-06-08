@@ -13,6 +13,7 @@ MSO_AUTOMATION_SECURITY_FORCE_DISABLE = 3
 PICTURE_COMPRESSION_VALUE = "AutomaticPictureCompressionDefault"
 OFFICE_VERSIONS = ("12.0", "14.0", "15.0", "16.0")
 RPC_E_CALL_REJECTED = -2147418111
+RPC_S_SERVER_UNAVAILABLE = -2147023174
 EXCEL_COM_RETRY_ATTEMPTS = 8
 EXCEL_COM_RETRY_DELAY_SECONDS = 1.5
 
@@ -158,6 +159,29 @@ def is_excel_call_rejected(exc: Exception) -> bool:
     return bool(getattr(exc, "args", ())) and getattr(exc, "args", ())[0] == RPC_E_CALL_REJECTED
 
 
+def is_excel_disconnect(exc: Exception) -> bool:
+    return bool(getattr(exc, "args", ())) and getattr(exc, "args", ())[0] in {
+        RPC_E_CALL_REJECTED,
+        RPC_S_SERVER_UNAVAILABLE,
+    }
+
+
+def close_workbook_quietly(workbook) -> None:
+    try:
+        workbook.Close(SaveChanges=False)
+    except Exception as exc:
+        if not is_excel_disconnect(exc):
+            raise
+
+
+def quit_excel_quietly(excel) -> None:
+    try:
+        excel.Quit()
+    except Exception as exc:
+        if not is_excel_disconnect(exc):
+            raise
+
+
 def call_excel_with_retry(action: str, func):
     last_exc: Exception | None = None
     for attempt in range(1, EXCEL_COM_RETRY_ATTEMPTS + 1):
@@ -262,10 +286,10 @@ def convert_with_excel(
                 print(f"[fail] {source}: {exc}", file=sys.stderr)
             finally:
                 if workbook is not None:
-                    workbook.Close(SaveChanges=False)
+                    close_workbook_quietly(workbook)
     finally:
         if excel is not None:
-            excel.Quit()
+            quit_excel_quietly(excel)
         pythoncom.CoUninitialize()
 
     return failures

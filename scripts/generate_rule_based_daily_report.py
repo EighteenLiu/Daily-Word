@@ -40,8 +40,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        source = args.ledger.resolve()
         ledger = prepare_ledger(args.ledger, args.output.parent)
-        rows = load_ledger_rows(ledger, include_images=ledger.suffix.lower() == ".xlsx")
+        image_source_path = source if source.suffix.lower() == ".xls" else None
+        rows = load_ledger_rows(ledger, include_images=True, image_source_path=image_source_path)
         report = build_street_report(rows, args.street)
         if not any((report.communities, report.restaurants, report.social_units)):
             raise RuntimeError(f"No report content found for street: {args.street}")

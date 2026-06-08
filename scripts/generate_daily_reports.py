@@ -127,8 +127,15 @@ def generate_reports(
     xlsx_path = extract.ensure_xlsx(extract_args)
     if structured.exists() and not overwrite:
         raise FileExistsError(f"Output already exists. Use --overwrite: {structured}")
+    image_source_path = source if source.suffix.lower() == ".xls" else None
     with tempfile.TemporaryDirectory(prefix="xls_extract_images_") as temp:
-        sheet_name, items, image_count = extract.extract_items(xlsx_path, None, 2, Path(temp))
+        sheet_name, items, image_count = extract.extract_items(
+            xlsx_path,
+            None,
+            2,
+            Path(temp),
+            image_source_path=image_source_path,
+        )
         if not items:
             raise RuntimeError("No problem rows were extracted. Check the header row and column names.")
         extract.write_docx(items, structured, source.name, sheet_name)
@@ -143,7 +150,7 @@ def generate_reports(
         output_dir=output_dir,
         template=template or split.REFERENCES_ROOT / "\u65e5\u62a5\u6a21\u7248.docx",
         date=date_value,
-        source_xlsx=xlsx,
+        source_xlsx=xlsx_path,
         transfer_doc=transfer_doc,
         overwrite=overwrite,
         include_non_street_headings=False,
@@ -162,7 +169,7 @@ def generate_reports(
         + (f" --template {effective_template}" if effective_template else "")
         + (f" --output-dir {output_dir}" if output_dir else "")
     )
-    rows = load_ledger_rows(xlsx_path, include_images=True)
+    rows = load_ledger_rows(xlsx_path, include_images=True, image_source_path=image_source_path)
     streets = _ordered_streets(rows)
     effective_template = (
         split.convert_template_to_docx(effective_template.resolve())

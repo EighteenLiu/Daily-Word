@@ -424,6 +424,7 @@ def extract_items(
     sheet_name: str | None,
     header_row: int,
     temp_dir: Path,
+    image_source_path: Path | None = None,
 ) -> tuple[str, list[ProblemItem], int]:
     openpyxl, _ = require_modules()
     workbook = openpyxl.load_workbook(xlsx_path, data_only=False, read_only=False)
@@ -459,12 +460,39 @@ def extract_items(
             )
         )
 
-    images = extract_images_from_xlsx(xlsx_path, selected_sheet, ignored_columns=ignored_columns)
+    images = []
+    if image_source_path and image_source_path.suffix.lower() == ".xls":
+        images = extract_images_from_xls(image_source_path, xlsx_path, selected_sheet)
+    if not images:
+        images = extract_images_from_xlsx(xlsx_path, selected_sheet, ignored_columns=ignored_columns)
     row_images = save_row_images(images, [item.source_row for item in raw_items], temp_dir)
     for item in raw_items:
         item.images = row_images.get(item.source_row, [])
 
     return selected_sheet, raw_items, len(images)
+
+
+def extract_images_from_xls(xls_path: Path, xlsx_path: Path, sheet_name: str) -> list[ExtractedImage]:
+    try:
+        try:
+            from scripts.daily_report_builder import extract_xls_original_row_images
+        except ModuleNotFoundError:
+            from daily_report_builder import extract_xls_original_row_images
+    except Exception:
+        return []
+
+    images: list[ExtractedImage] = []
+    for image in extract_xls_original_row_images(xls_path, xlsx_path, sheet_name):
+        images.append(
+            ExtractedImage(
+                row=image.row_number,
+                col=image.column_number,
+                media_name=image.media_name,
+                media_bytes=image.data,
+                suffix=image.suffix,
+            )
+        )
+    return images
 
 
 def set_document_styles(document) -> None:
@@ -632,8 +660,15 @@ def main() -> int:
         if output_path.exists() and not args.overwrite:
             raise FileExistsError(f"Output already exists. Use --overwrite: {output_path}")
 
+        image_source_path = args.input.resolve() if args.input.suffix.lower() == ".xls" else None
         with tempfile.TemporaryDirectory(prefix="xls_extract_images_") as temp:
-            sheet_name, items, image_count = extract_items(xlsx_path, args.sheet, args.header_row, Path(temp))
+            sheet_name, items, image_count = extract_items(
+                xlsx_path,
+                args.sheet,
+                args.header_row,
+                Path(temp),
+                image_source_path=image_source_path,
+            )
             if not items:
                 raise RuntimeError("No problem rows were extracted. Check the header row and column names.")
             write_docx(items, output_path, args.input.name, sheet_name)

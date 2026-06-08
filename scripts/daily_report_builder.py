@@ -5,6 +5,7 @@ import random
 import zipfile
 import bisect
 import hashlib
+from io import BytesIO
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,13 @@ class LedgerRow:
 class RowImage:
     row_number: int
     column_number: int
+    media_name: str
+    suffix: str
+    data: bytes
+
+
+@dataclass
+class EmbeddedImage:
     media_name: str
     suffix: str
     data: bytes
@@ -107,13 +115,21 @@ def display_text(value: object) -> str:
     return re.sub(r"[ \t\u3000]+", "", text).strip()
 
 
-def load_ledger_rows(path: Path, include_images: bool = False) -> list[LedgerRow]:
+def load_ledger_rows(
+    path: Path,
+    include_images: bool = False,
+    image_source_path: Path | None = None,
+) -> list[LedgerRow]:
     if path.suffix.lower() == ".xlsx":
-        return _load_xlsx_rows(path, include_images=include_images)
-    return _load_excel_com_rows(path)
+        return _load_xlsx_rows(path, include_images=include_images, image_source_path=image_source_path)
+    return _load_excel_com_rows(path, include_images=include_images)
 
 
-def _load_xlsx_rows(path: Path, include_images: bool = False) -> list[LedgerRow]:
+def _load_xlsx_rows(
+    path: Path,
+    include_images: bool = False,
+    image_source_path: Path | None = None,
+) -> list[LedgerRow]:
     import openpyxl
 
     workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
@@ -136,11 +152,11 @@ def _load_xlsx_rows(path: Path, include_images: bool = False) -> list[LedgerRow]
         )
     rows = [row for row in rows if any((row.category, row.street, row.place, row.problem))]
     if include_images:
-        _attach_xlsx_images(path, sheet.title, rows)
+        _attach_images(path, sheet.title, rows, image_source_path=image_source_path)
     return rows
 
 
-def _load_excel_com_rows(path: Path) -> list[LedgerRow]:
+def _load_excel_com_rows(path: Path, include_images: bool = False) -> list[LedgerRow]:
     import win32com.client
 
     excel = win32com.client.DispatchEx("Excel.Application")
@@ -167,19 +183,44 @@ def _load_excel_com_rows(path: Path) -> list[LedgerRow]:
                 )
             )
         workbook.Close(False)
-        return [row for row in rows if any((row.category, row.street, row.place, row.problem))]
+        workbook = None
+        rows = [row for row in rows if any((row.category, row.street, row.place, row.problem))]
+        if include_images:
+            image_root = path.parent / "extracted_images" / path.stem
+            _attach_row_images(rows, extract_excel_com_row_images(path), image_root)
+        return rows
     finally:
-        excel.Quit()
+        if "workbook" in locals() and workbook is not None:
+            try:
+                workbook.Close(False)
+            except Exception:
+                pass
+        try:
+            excel.Quit()
+        except Exception:
+            pass
 
 
-def _attach_xlsx_images(path: Path, sheet_name: str, rows: list[LedgerRow]) -> None:
-    image_root = path.parent / "extracted_images" / path.stem
+def _attach_images(
+    path: Path,
+    sheet_name: str,
+    rows: list[LedgerRow],
+    image_source_path: Path | None = None,
+) -> None:
+    image_source_path = image_source_path.resolve() if image_source_path else path
+    image_root = path.parent / "extracted_images" / image_source_path.stem
+    images: list[RowImage] = []
+    images = extract_xlsx_row_images(path, sheet_name)
+    _attach_row_images(rows, images, image_root)
+
+
+def _attach_row_images(rows: list[LedgerRow], images: Iterable[RowImage], image_root: Path) -> None:
     image_root.mkdir(parents=True, exist_ok=True)
     row_numbers = [row.row_number for row in rows]
     row_map = {row.row_number: row for row in rows}
     counters: dict[int, int] = defaultdict(int)
     seen: set[str] = set()
-    for image in extract_xlsx_row_images(path, sheet_name):
+    for image in images:
         row_number = _nearest_data_row(image.row_number, row_numbers)
         row = row_map.get(row_number) if row_number is not None else None
         if row is None:
@@ -193,6 +234,236 @@ def _attach_xlsx_images(path: Path, sheet_name: str, rows: list[LedgerRow]) -> N
         output = image_root / f"row_{row.row_number}_{counters[row.row_number]}_{digest[:10]}{image.suffix}"
         output.write_bytes(image.data)
         row.image_paths.append(output)
+
+
+def extract_xls_original_row_images(xls_path: Path, xlsx_path: Path, sheet_name: str) -> list[RowImage]:
+    anchored_images = extract_xlsx_row_images(xlsx_path, sheet_name)
+    original_images = extract_xls_embedded_images(xls_path)
+    if not anchored_images or not original_images:
+        return []
+
+    original_hashes = [(_image_hash(image.data), image) for image in original_images]
+    if any(hash_value is None for hash_value, _ in original_hashes):
+        return _pair_xls_images_by_order(anchored_images, original_images)
+
+    replaced: list[RowImage] = []
+    used_original_indexes: set[int] = set()
+    for anchored in anchored_images:
+        thumb_hash = _image_hash(anchored.data)
+        if thumb_hash is None:
+            replaced.append(anchored)
+            continue
+        best_distance = 10**9
+        best_image: EmbeddedImage | None = None
+        best_index: int | None = None
+        for index, (original_hash, original) in enumerate(original_hashes):
+            if index in used_original_indexes:
+                continue
+            if original_hash is None:
+                continue
+            distance = (thumb_hash ^ original_hash).bit_count()
+            if distance < best_distance:
+                best_distance = distance
+                best_image = original
+                best_index = index
+        if best_image is None or best_index is None or best_distance > 110:
+            replaced.append(anchored)
+            continue
+        used_original_indexes.add(best_index)
+        replaced.append(
+            RowImage(
+                row_number=anchored.row_number,
+                column_number=anchored.column_number,
+                media_name=f"{anchored.media_name}|{best_image.media_name}",
+                suffix=best_image.suffix,
+                data=best_image.data,
+            )
+        )
+    return replaced
+
+
+def _pair_xls_images_by_order(anchored_images: list[RowImage], original_images: list[EmbeddedImage]) -> list[RowImage]:
+    paired: list[RowImage] = []
+    for index, anchored in enumerate(anchored_images):
+        if index >= len(original_images):
+            paired.append(anchored)
+            continue
+        original = original_images[index]
+        paired.append(
+            RowImage(
+                row_number=anchored.row_number,
+                column_number=anchored.column_number,
+                media_name=f"{anchored.media_name}|{original.media_name}",
+                suffix=original.suffix,
+                data=original.data,
+            )
+        )
+    return paired
+
+
+def extract_xls_embedded_images(path: Path) -> list[EmbeddedImage]:
+    try:
+        import olefile
+    except ImportError:
+        return []
+
+    images: list[EmbeddedImage] = []
+    try:
+        ole = olefile.OleFileIO(str(path))
+    except Exception:
+        return []
+    try:
+        for stream in ole.listdir(streams=True, storages=False):
+            if stream[-1] not in {"Workbook", "Book"}:
+                continue
+            data = ole.openstream(stream).read()
+            images.extend(_scan_image_blobs(data, "/".join(stream)))
+    finally:
+        ole.close()
+    return images
+
+
+def _scan_image_blobs(data: bytes, stream_name: str) -> list[EmbeddedImage]:
+    images: list[EmbeddedImage] = []
+    index = 0
+    counters: dict[str, int] = defaultdict(int)
+    signatures = ((b"\xff\xd8\xff", ".jpg"), (b"\x89PNG\r\n\x1a\n", ".png"))
+    while index < len(data):
+        starts = [(pos, suffix) for signature, suffix in signatures if (pos := data.find(signature, index)) != -1]
+        if not starts:
+            break
+        start, suffix = min(starts, key=lambda item: item[0])
+        if suffix == ".png":
+            end = data.find(b"IEND\xaeB`\x82", start)
+            if end == -1:
+                index = start + 8
+                continue
+            end += 8
+        else:
+            end = data.find(b"\xff\xd9", start + 3)
+            if end == -1:
+                index = start + 3
+                continue
+            end += 2
+        blob = data[start:end]
+        if _valid_problem_photo_blob(blob):
+            counters[suffix] += 1
+            images.append(
+                EmbeddedImage(
+                    media_name=f"{stream_name}_image_{counters[suffix]}",
+                    suffix=suffix,
+                    data=blob,
+                )
+            )
+        index = end
+    return images
+
+
+def _valid_problem_photo_blob(data: bytes) -> bool:
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+            image.verify()
+    except Exception:
+        return False
+    return width >= 300 or height >= 300
+
+
+def _image_hash(data: bytes) -> int | None:
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageOps
+
+        with Image.open(BytesIO(data)) as image:
+            image = ImageOps.exif_transpose(image).convert("L").resize((16, 16))
+            pixels = list(image.getdata())
+    except Exception:
+        return None
+    average = sum(pixels) / len(pixels)
+    bits = 0
+    for pixel in pixels:
+        bits = (bits << 1) | int(pixel >= average)
+    return bits
+
+
+def extract_excel_com_row_images(path: Path, sheet_name: str | None = None) -> list[RowImage]:
+    try:
+        import win32com.client
+    except ImportError:
+        return []
+
+    excel = win32com.client.DispatchEx("Excel.Application")
+    excel.Visible = False
+    excel.DisplayAlerts = False
+    images: list[RowImage] = []
+    workbook = None
+    try:
+        workbook = excel.Workbooks.Open(str(path.resolve()), ReadOnly=True, UpdateLinks=0, AddToMru=False)
+        sheet = workbook.Worksheets(sheet_name) if sheet_name else workbook.Worksheets(1)
+        image_columns = _excel_image_columns(sheet)
+        original_images = extract_xls_embedded_images(path)
+        original_index = 0
+        shape_count = int(sheet.Shapes.Count)
+        for index in range(1, shape_count + 1):
+            shape = sheet.Shapes.Item(index)
+            try:
+                row_number = int(shape.TopLeftCell.Row)
+                column_number = int(shape.TopLeftCell.Column)
+            except Exception:
+                continue
+            if column_number not in image_columns:
+                continue
+            if original_index >= len(original_images):
+                break
+            original = original_images[original_index]
+            original_index += 1
+            images.append(
+                RowImage(
+                    row_number=row_number,
+                    column_number=column_number,
+                    media_name=f"excel_shape_{index}|{original.media_name}",
+                    suffix=original.suffix,
+                    data=original.data,
+                )
+            )
+    except Exception:
+        return []
+    finally:
+        if workbook is not None:
+            try:
+                workbook.Close(False)
+            except Exception:
+                pass
+        try:
+            excel.Quit()
+        except Exception:
+            pass
+    return images
+
+
+def _excel_image_columns(sheet) -> set[int]:
+    try:
+        max_columns = int(sheet.UsedRange.Columns.Count)
+    except Exception:
+        max_columns = 200
+    matches: set[int] = set()
+    for column in range(1, max_columns + 1):
+        try:
+            value = normalize_text(sheet.Cells(1, column).Text)
+        except Exception:
+            continue
+        if value == "问题照片":
+            matches.add(column)
+            try:
+                merge_area = sheet.Cells(1, column).MergeArea
+                start = int(merge_area.Column)
+                count = int(merge_area.Columns.Count)
+                matches.update(range(start, start + count))
+            except Exception:
+                pass
+    return matches or FALLBACK_IMAGE_COLUMNS
 
 
 def extract_xlsx_row_images(path: Path, sheet_name: str) -> list[RowImage]:

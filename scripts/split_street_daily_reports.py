@@ -258,26 +258,44 @@ def infer_latest_date_from_xlsx(xlsx_path: Path) -> ReportDate | None:
     workbook = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
     try:
         sheet = workbook[workbook.sheetnames[0]]
-        date_columns = date_related_columns(sheet)
+        identifier_columns = identifier_date_columns(sheet)
+        if not identifier_columns:
+            return None
         for row_index, row in enumerate(sheet.iter_rows(), start=1):
             for column_index, cell in enumerate(row, start=1):
-                allow_short = row_index <= 5 or column_index in date_columns
-                dates.extend(dates_from_cell_value(cell.value, allow_short_dates=allow_short))
+                if column_index not in identifier_columns:
+                    continue
+                dates.extend(dates_from_identifier_value(cell.value))
     finally:
         workbook.close()
     return ReportDate(max(dates)) if dates else None
 
 
-def date_related_columns(sheet) -> set[int]:
+def identifier_date_columns(sheet) -> set[int]:
     columns: set[int] = set()
-    keywords = ("日期", "时间", "编号", "案件上报时间", "创建时间")
-    max_row = min(sheet.max_row, 2)
+    max_row = min(sheet.max_row, 3)
     for row in range(1, max_row + 1):
         for col in range(1, sheet.max_column + 1):
-            header = str(sheet.cell(row, col).value or "")
-            if any(keyword in header for keyword in keywords):
+            header = re.sub(r"\s+", "", str(sheet.cell(row, col).value or ""))
+            if "编号" in header:
                 columns.add(col)
     return columns
+
+
+def dates_from_identifier_value(value: object) -> list[date]:
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    digits = re.sub(r"\D", "", text)
+    if len(digits) < 8:
+        return []
+    match = re.search(r"20\d{6}", digits)
+    if not match:
+        return []
+    parsed = _safe_date(match.group(0)[:4], match.group(0)[4:6], match.group(0)[6:8])
+    return [parsed] if parsed else []
 
 
 def dates_from_cell_value(value: object, allow_short_dates: bool = True) -> list[date]:
@@ -339,21 +357,7 @@ def resolve_report_date(args: argparse.Namespace, input_path: Path) -> ReportDat
         if inferred:
             return inferred
 
-    inferred = infer_date_from_filename(input_path)
-    if inferred:
-        return inferred
-
-    if source_xlsx and source_xlsx.exists():
-        inferred = infer_date_from_filename(source_xlsx)
-        if inferred:
-            return inferred
-
-    if source_xlsx and source_xlsx.exists():
-        inferred = infer_date_from_xlsx(source_xlsx)
-        if inferred:
-            return inferred
-
-    raise RuntimeError("Could not infer report date. Pass --date 5.17 or --date 2026-05-17.")
+    raise RuntimeError("Could not infer report date from the 编号 column. Pass --date 5.17 or --date 2026-05-17.")
 
 
 def transfer_date_tokens(report_date: ReportDate) -> tuple[str, ...]:
