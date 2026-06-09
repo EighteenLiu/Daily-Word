@@ -6,6 +6,7 @@ import queue
 import shutil
 import sys
 import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -344,7 +345,10 @@ class DailyReportApp(tk.Tk):
             if return_code == 0:
                 self.log_queue.put(f"[ok] 输出目录: {OUTPUT_ROOT}")
         except Exception as exc:
-            self.log_queue.put(f"[fail] {exc}")
+            self.log_queue.put(f"[fail] {type(exc).__name__}: {exc}")
+            for line in traceback.format_exception(type(exc), exc, exc.__traceback__):
+                for part in line.rstrip().splitlines():
+                    self.log_queue.put(part)
         finally:
             self.log_queue.put("__ENABLE_BUTTON__")
 

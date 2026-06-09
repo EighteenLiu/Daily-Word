@@ -774,6 +774,8 @@ def is_no_problem(text: str) -> bool:
         "均有设置",
         "已核实",
         "不是箱房小区",
+        "该小区是纯箱房小区",
+        "该小区是纯厢房小区",
         "没有智能可回收垃圾箱",
         "无智能可回收垃圾箱",
     )
@@ -813,6 +815,10 @@ def _is_inspection_count_text(text: str) -> bool:
 def effective_problem_text(row: LedgerRow) -> str:
     problem = clean_problem_text(row.problem)
     indicator3 = clean_problem_text(row.indicator3)
+    if "小区公示牌" in row.indicator2:
+        return indicator3
+    if "小区宣传引导" in row.indicator2:
+        return indicator3
     if "居民自主投放" in row.indicator2 and (
         "投放错误" in row.problem
         or "不准确" in row.problem
@@ -935,24 +941,19 @@ def _build_communities(rows: list[LedgerRow]) -> list[CommunitySection]:
     communities: list[CommunitySection] = []
     for index, (place, place_rows) in enumerate(_group_by_place(rows).items(), start=1):
         is_pure_box_room = _is_pure_box_room(place, place_rows)
-        if is_pure_box_room:
-            overall_rows = [row for row in place_rows if "居民自主投放" in row.indicator2]
-        else:
-            overall_rows = [
-                row
-                for row in place_rows
-                if "小区宣传" not in row.indicator2
-                and "小区公示牌" not in row.indicator2
-            ]
+        overall_rows = _overall_problem_rows(place_rows)
         section = CommunitySection(
             index_cn=chinese_numeral(index),
             name=_display_place_name(place, place_rows),
-            overall_problem_summary=summarize_problem_rows(overall_rows),
+            overall_problem_summary=summarize_community_problem_rows(
+                overall_rows,
+                prefer_station_indicators=is_pure_box_room,
+            ),
             overall_intro="",
             promo_images=_images_for_indicator(place_rows, "小区宣传"),
             promo_text=_indicator_problem_text(place_rows, "小区宣传"),
             notice_board_images=_images_for_indicator(place_rows, "小区公示牌"),
-            notice_board_text=_indicator_problem_text(place_rows, "小区公示牌"),
+            notice_board_text=_notice_board_problem_text(place_rows),
             is_pure_box_room=is_pure_box_room,
             stations=_build_pure_box_station_sections(place_rows) if is_pure_box_room else _build_station_sections(place_rows),
             resident_delivery=_build_resident_delivery(place_rows),
@@ -960,6 +961,51 @@ def _build_communities(rows: list[LedgerRow]) -> list[CommunitySection]:
         _attach_unassigned_community_images(section, place_rows)
         communities.append(section)
     return communities
+
+
+def _overall_problem_rows(rows: list[LedgerRow]) -> list[LedgerRow]:
+    return list(rows)
+
+
+def summarize_community_problem_rows(rows: Iterable[LedgerRow], prefer_station_indicators: bool = False) -> str:
+    ordered: list[str] = []
+    counts: dict[str, int] = {}
+    for row in rows:
+        if is_no_problem(row.problem) and not _indicator3_can_define_problem(row):
+            continue
+        if _is_positive_indicator_result(row):
+            continue
+        if prefer_station_indicators and _is_station_setting_row(row):
+            problem = station_problem_text_from_row(row)
+        else:
+            problem = effective_problem_text(row)
+        if not problem:
+            continue
+        if problem not in counts:
+            ordered.append(problem)
+            counts[problem] = 0
+        counts[problem] += _problem_weight(row, problem)
+    problems = [_format_problem_count(problem, counts[problem]) for problem in ordered]
+    if not problems:
+        return "无问题。"
+    if len(problems) == 1:
+        return f"（1）{problems[0]}。"
+    return "；".join(f"（{index}）{problem}" for index, problem in enumerate(problems, start=1)) + "。"
+
+
+def _indicator3_can_define_problem(row: LedgerRow) -> bool:
+    if "小区公示牌" in row.indicator2 and not is_no_problem(row.indicator3):
+        return True
+    if "小区宣传引导" in row.indicator2 and not is_no_problem(row.indicator3):
+        return True
+    return False
+
+
+def _is_positive_indicator_result(row: LedgerRow) -> bool:
+    return is_no_problem(row.indicator3) and not any(
+        marker in row.problem
+        for marker in ("不", "无", "未", "外摆", "满冒", "混投", "散桶", "错误", "破损")
+    )
 
 
 def _is_pure_box_room(place: str, rows: list[LedgerRow]) -> bool:
@@ -975,17 +1021,25 @@ def _build_station_sections(rows: list[LedgerRow]) -> list[StationSection]:
     station_rows = [
         row
         for row in fallback_rows
-        if "容器" in row.indicator2 or "投放点环境" in row.indicator2 or station_number_from_problem(row.problem)
+        if _is_station_setting_row(row)
     ]
     if not station_rows:
         return []
     return _build_station_sections_from_rows(station_rows, fallback_rows)
 
 
+def _is_station_setting_row(row: LedgerRow) -> bool:
+    if _is_resident_delivery_row(row):
+        return False
+    return station_number_from_problem(row.problem) is not None
+
+
 def _build_station_sections_from_rows(station_rows: list[LedgerRow], fallback_rows: list[LedgerRow]) -> list[StationSection]:
     grouped: dict[str, list[LedgerRow]] = defaultdict(list)
     for row in station_rows:
-        station_no = station_number_from_problem(row.problem) or "1"
+        station_no = station_number_from_problem(row.problem)
+        if not station_no:
+            continue
         grouped[station_no].append(row)
     sections: list[StationSection] = []
     for station_no, group in grouped.items():
@@ -1020,13 +1074,7 @@ def _build_pure_box_station_sections(rows: list[LedgerRow]) -> list[StationSecti
     station_rows = [
         row
         for row in fallback_rows
-        if (
-            station_number_from_problem(row.problem)
-            or "环境" in row.indicator2
-            or "容器" in row.problem
-            or "容器" in row.indicator3
-            or "投放点" in row.indicator2
-        )
+        if _is_station_setting_row(row)
     ]
     if station_rows:
         return _build_station_sections_from_rows(station_rows, fallback_rows)
@@ -1036,6 +1084,24 @@ def _build_pure_box_station_sections(rows: list[LedgerRow]) -> list[StationSecti
 
 def _indicator_problem_text(rows: list[LedgerRow], keyword: str) -> str:
     return summarize_station_problem_rows(row for row in rows if keyword in row.indicator2)
+
+
+def _notice_board_problem_text(rows: list[LedgerRow]) -> str:
+    problems: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if "小区公示牌" not in row.indicator2:
+            continue
+        problem = clean_problem_text(row.indicator3)
+        if not problem or problem in seen:
+            continue
+        seen.add(problem)
+        problems.append(problem)
+    if not problems:
+        return "无问题"
+    if len(problems) == 1:
+        return problems[0]
+    return "；".join(f"（{index}）{problem}" for index, problem in enumerate(problems, start=1)) + "。"
 
 
 def summarize_station_problem_texts(texts: Iterable[str]) -> str:
@@ -1165,11 +1231,7 @@ def _collect_images(rows: Iterable[LedgerRow]) -> list[Path]:
 
 def _images_with_minimum(primary_rows: Iterable[LedgerRow], fallback_rows: Iterable[LedgerRow], minimum: int) -> list[Path]:
     primary_images = _collect_images(primary_rows)
-    if len(primary_images) >= minimum:
-        return primary_images
-    needed = minimum - len(primary_images)
-    fallback_images = _remaining_images(fallback_rows, primary_images)
-    return _unique_images(primary_images + fallback_images[:needed])
+    return primary_images
 
 
 def _attach_unassigned_community_images(section: CommunitySection, rows: list[LedgerRow]) -> None:
@@ -1184,7 +1246,6 @@ def _attach_unassigned_community_images(section: CommunitySection, rows: list[Le
         return
 
     if section.stations:
-        section.stations[0].images = _unique_images(section.stations[0].images + remaining)
         return
 
     section.stations.append(

@@ -102,14 +102,10 @@ def _word_image_path(
     if not image_path.exists():
         return None
 
-    profile = image_compression_profile(image_compression)
-    if profile is None:
-        image_cache[image_path] = image_path
-        return image_path
-
     from PIL import Image
     from PIL import ImageOps
 
+    profile = image_compression_profile(image_compression)
     output = temp_dir / f"image_{len(image_cache) + 1}.jpg"
     try:
         with Image.open(image_path) as image:
@@ -120,13 +116,16 @@ def _word_image_path(
                 image = canvas
             else:
                 image = image.convert("RGB")
-            target_size = (
-                min(profile.width, image.width),
-                min(profile.height, image.height),
-            )
-            if image.size != target_size:
-                image = image.resize(target_size, Image.Resampling.LANCZOS)
-            image.save(output, "JPEG", quality=profile.quality, optimize=True, progressive=True)
+            quality = 95
+            if profile is not None:
+                target_size = (
+                    min(profile.width, image.width),
+                    min(profile.height, image.height),
+                )
+                if image.size != target_size:
+                    image = image.resize(target_size, Image.Resampling.LANCZOS)
+                quality = profile.quality
+            image.save(output, "JPEG", quality=quality, optimize=True, progressive=False)
     except Exception:
         return None
     image_cache[image_path] = output

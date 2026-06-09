@@ -297,7 +297,19 @@ def write_garbage_summary(
     report_date,
     output_dir: Path,
     street_report_paths: list[tuple[str, Path]] | None = None,
+    ledger_rows: list | None = None,
 ) -> Path:
+    if ledger_rows is not None:
+        try:
+            from garbage_daily_report import build_garbage_daily_context, render_garbage_daily_report
+        except ModuleNotFoundError:
+            from scripts.garbage_daily_report import build_garbage_daily_context, render_garbage_daily_report
+
+        context = build_garbage_daily_context(ledger_rows, report_date)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{chinese_day_prefix(report_date)}{CN_GARBAGE_DAILY}.docx"
+        return render_garbage_daily_report(template_path.resolve(), context, output_path)
+
     from docx import Document
     import split_street_daily_reports as split
 
@@ -363,7 +375,26 @@ def write_garbage_summary(
     return output_path
 
 
-def write_daily_summary(template_path: Path, reports: dict, report_date, output_dir: Path) -> Path:
+def write_daily_summary(template_path: Path, reports: dict, report_date, output_dir: Path, ledger_rows: list | None = None) -> Path:
+    if ledger_rows is not None:
+        try:
+            from docxtpl import DocxTemplate
+        except ModuleNotFoundError:
+            raise
+        try:
+            from garbage_daily_report import build_garbage_daily_context
+        except ModuleNotFoundError:
+            from scripts.garbage_daily_report import build_garbage_daily_context
+
+        context = build_garbage_daily_context(ledger_rows, report_date)
+        context["street_problem_counts"] = _street_problem_counts_from_context(context)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{CN_DAILY_SUMMARY}({report_date.value.day}).docx"
+        doc = DocxTemplate(str(template_path.resolve()))
+        doc.render(context)
+        doc.save(str(output_path))
+        return output_path
+
     from docx import Document
     import split_street_daily_reports as split
 
@@ -405,6 +436,7 @@ def write_summaries(
     daily_template: Path | None = None,
     output_dir: Path | None = None,
     street_report_paths: list[tuple[str, Path]] | None = None,
+    ledger_rows: list | None = None,
 ) -> list[Path]:
     output_dir = output_dir or default_summary_output_dir(report_date)
     written: list[Path] = []
@@ -416,8 +448,19 @@ def write_summaries(
                 report_date,
                 output_dir,
                 street_report_paths=street_report_paths,
+                ledger_rows=ledger_rows,
             )
         )
     if daily_template:
-        written.append(write_daily_summary(daily_template, reports, report_date, output_dir))
+        written.append(write_daily_summary(daily_template, reports, report_date, output_dir, ledger_rows=ledger_rows))
     return written
+
+
+def _street_problem_counts_from_context(context: dict) -> list[dict[str, int | str]]:
+    counts: OrderedDict[str, int] = OrderedDict()
+    for street in context.get("residential_streets", []):
+        counts[street["name"]] = sum(len(point.get("issues", [])) for point in street.get("points", []))
+    return [
+        {"short_name": short_street_name(street), "problem_count": count}
+        for street, count in counts.items()
+    ]

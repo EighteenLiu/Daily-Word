@@ -234,6 +234,7 @@ def generate_reports(
             daily_template=daily_summary_template,
             output_dir=summary_output_dir,
             street_report_paths=street_report_paths,
+            ledger_rows=rows,
         )
         for path in written_summaries:
             print(f"[ok] summary: {path}")
