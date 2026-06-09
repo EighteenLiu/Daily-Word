@@ -15,21 +15,43 @@ from tkinter import filedialog, messagebox, ttk
 WORKSPACE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 INPUT_ROOT = WORKSPACE / "input"
 OUTPUT_ROOT = WORKSPACE / "output"
-DEFAULT_TEMPLATE = INPUT_ROOT / "日报模版.docx"
+
+
+def first_existing_input_file(*names: str) -> Path:
+    for name in names:
+        path = INPUT_ROOT / name
+        if path.exists():
+            return path
+    return INPUT_ROOT / names[0]
+
+
+DEFAULT_TEMPLATE = first_existing_input_file("街道日报模板.docx", "日报模版.docx", "daily_report_jinja_template.docx")
+DEFAULT_GARBAGE_SUMMARY_TEMPLATE = first_existing_input_file("5月17日垃圾分类工作日报.docx")
+DEFAULT_DAILY_SUMMARY_TEMPLATE = first_existing_input_file("每日汇总情况(10).docx")
 
 
 class DailyReportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("日报生成工具")
-        self.geometry("760x500")
-        self.minsize(680, 460)
+        self.geometry("860x620")
+        self.minsize(760, 560)
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
 
         self.ledger_var = tk.StringVar(value=str(self.find_newest_ledger() or ""))
         self.template_var = tk.StringVar(value=str(DEFAULT_TEMPLATE if DEFAULT_TEMPLATE.exists() else ""))
+        self.summary_enabled_var = tk.BooleanVar(
+            value=DEFAULT_GARBAGE_SUMMARY_TEMPLATE.exists() or DEFAULT_DAILY_SUMMARY_TEMPLATE.exists()
+        )
+        self.garbage_summary_template_var = tk.StringVar(
+            value=str(DEFAULT_GARBAGE_SUMMARY_TEMPLATE if DEFAULT_GARBAGE_SUMMARY_TEMPLATE.exists() else "")
+        )
+        self.daily_summary_template_var = tk.StringVar(
+            value=str(DEFAULT_DAILY_SUMMARY_TEMPLATE if DEFAULT_DAILY_SUMMARY_TEMPLATE.exists() else "")
+        )
+        self.compression_var = tk.StringVar(value="standard")
 
         self.configure_style()
         self.build_ui()
@@ -50,7 +72,7 @@ class DailyReportApp(tk.Tk):
         root.rowconfigure(3, weight=1)
 
         ttk.Label(root, text="日报生成工具", style="Title.TLabel").grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(root, text="选择台账和日报模板后，点击生成即可。", style="Hint.TLabel").grid(
+        ttk.Label(root, text="选择台账和模板后，可同时生成街道日报、每日汇总和垃圾分类工作日报。", style="Hint.TLabel").grid(
             row=1,
             column=0,
             sticky=tk.W,
@@ -72,11 +94,29 @@ class DailyReportApp(tk.Tk):
         self.add_file_row(
             form,
             row=1,
-            label="模板",
+            label="街道日报模板",
             variable=self.template_var,
             button_text="选择模板",
             command=self.choose_template,
         )
+        self.add_summary_toggle_row(form, row=2)
+        self.add_file_row(
+            form,
+            row=3,
+            label="垃圾分类日报模板",
+            variable=self.garbage_summary_template_var,
+            button_text="选择模板",
+            command=self.choose_garbage_summary_template,
+        )
+        self.add_file_row(
+            form,
+            row=4,
+            label="每日汇总模板",
+            variable=self.daily_summary_template_var,
+            button_text="选择模板",
+            command=self.choose_daily_summary_template,
+        )
+        self.add_compression_row(form, row=5)
 
         actions = ttk.Frame(root)
         actions.grid(row=3, column=0, sticky=tk.NSEW, pady=(18, 0))
@@ -123,6 +163,39 @@ class DailyReportApp(tk.Tk):
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky=tk.EW, padx=(12, 8), pady=8)
         ttk.Button(parent, text=button_text, command=command).grid(row=row, column=2, sticky=tk.EW, pady=8)
 
+    def add_summary_toggle_row(self, parent: ttk.Frame, row: int) -> None:
+        ttk.Label(parent, text="汇总报告").grid(row=row, column=0, sticky=tk.W, pady=8)
+        ttk.Checkbutton(
+            parent,
+            text="同时生成每日汇总和垃圾分类工作日报",
+            variable=self.summary_enabled_var,
+        ).grid(row=row, column=1, sticky=tk.W, padx=(12, 8), pady=8)
+        ttk.Label(parent, text="不需要时可取消勾选", style="Hint.TLabel").grid(row=row, column=2, sticky=tk.W, pady=8)
+
+    def add_compression_row(self, parent: ttk.Frame, row: int) -> None:
+        ttk.Label(parent, text="图片压缩").grid(row=row, column=0, sticky=tk.W, pady=8)
+        options = ttk.Frame(parent)
+        options.grid(row=row, column=1, sticky=tk.W, padx=(12, 8), pady=8)
+        for index, (label, value) in enumerate(
+            (
+                ("标准", "standard"),
+                ("轻度", "light"),
+                ("强力", "strong"),
+                ("不压缩", "none"),
+            )
+        ):
+            ttk.Radiobutton(options, text=label, value=value, variable=self.compression_var).grid(
+                row=0,
+                column=index,
+                padx=(0, 10),
+                sticky=tk.W,
+            )
+        ttk.Label(
+            parent,
+            text="标准: 推荐；轻度: 更清晰；强力: 更小；none: 不压缩",
+            style="Hint.TLabel",
+        ).grid(row=row, column=2, sticky=tk.W, pady=8)
+
     def find_newest_ledger(self) -> Path | None:
         INPUT_ROOT.mkdir(parents=True, exist_ok=True)
         candidates = [
@@ -152,6 +225,34 @@ class DailyReportApp(tk.Tk):
         self.template_var.set(str(source))
         self.append_log(f"[ok] 模板已选择: {source}")
 
+    def choose_garbage_summary_template(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择垃圾分类工作日报模板",
+            filetypes=[("Word templates", "*.docx"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        source = Path(path)
+        self.garbage_summary_template_var.set(str(source))
+        self.summary_enabled_var.set(True)
+        self.append_log(f"[ok] 垃圾分类工作日报模板已选择: {source}")
+
+    def choose_daily_summary_template(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择每日汇总模板",
+            filetypes=[("Word templates", "*.docx"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        source = Path(path)
+        self.daily_summary_template_var.set(str(source))
+        self.summary_enabled_var.set(True)
+        self.append_log(f"[ok] 每日汇总模板已选择: {source}")
+
+    def optional_path_from_var(self, variable: tk.StringVar) -> Path | None:
+        value = variable.get().strip().strip('"')
+        return Path(value) if value else None
+
     def start_generation(self) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("正在生成", "日报正在生成中，请等待完成。")
@@ -159,21 +260,53 @@ class DailyReportApp(tk.Tk):
 
         ledger = Path(self.ledger_var.get().strip().strip('"'))
         template = Path(self.template_var.get().strip().strip('"'))
+        garbage_summary_template = self.optional_path_from_var(self.garbage_summary_template_var)
+        daily_summary_template = self.optional_path_from_var(self.daily_summary_template_var)
         if not ledger.exists():
             messagebox.showerror("文件不存在", f"台账不存在:\n{ledger}")
             return
         if not template.exists():
             messagebox.showerror("文件不存在", f"模板不存在:\n{template}")
             return
+        if self.summary_enabled_var.get():
+            if not garbage_summary_template and not daily_summary_template:
+                messagebox.showerror("汇总模板缺失", "请至少选择一个汇总模板，或取消勾选“同时生成每日汇总和垃圾分类工作日报”。")
+                return
+            for label, path in (
+                ("垃圾分类工作日报模板", garbage_summary_template),
+                ("每日汇总模板", daily_summary_template),
+            ):
+                if path and not path.exists():
+                    messagebox.showerror("文件不存在", f"{label}不存在:\n{path}")
+                    return
+        else:
+            garbage_summary_template = None
+            daily_summary_template = None
 
         self.generate_button.configure(state=tk.DISABLED, text="正在生成...")
         self.log_text.delete("1.0", tk.END)
         self.append_log(f"[run] 台账: {ledger}")
-        self.append_log(f"[run] 模板: {template}")
-        self.worker = threading.Thread(target=self.run_generation, args=(ledger, template), daemon=True)
+        self.append_log(f"[run] 街道日报模板: {template}")
+        if garbage_summary_template:
+            self.append_log(f"[run] 垃圾分类工作日报模板: {garbage_summary_template}")
+        if daily_summary_template:
+            self.append_log(f"[run] 每日汇总模板: {daily_summary_template}")
+        self.append_log(f"[run] 图片压缩: {self.compression_var.get()}")
+        self.worker = threading.Thread(
+            target=self.run_generation,
+            args=(ledger, template, self.compression_var.get(), garbage_summary_template, daily_summary_template),
+            daemon=True,
+        )
         self.worker.start()
 
-    def run_generation(self, ledger: Path, template: Path) -> None:
+    def run_generation(
+        self,
+        ledger: Path,
+        template: Path,
+        image_compression: str,
+        garbage_summary_template: Path | None,
+        daily_summary_template: Path | None,
+    ) -> None:
         try:
             import generate_daily_reports
 
@@ -202,6 +335,9 @@ class DailyReportApp(tk.Tk):
                     overwrite=True,
                     template=template,
                     output_dir=OUTPUT_ROOT,
+                    garbage_summary_template=garbage_summary_template,
+                    daily_summary_template=daily_summary_template,
+                    image_compression=image_compression,
                 )
             writer.flush()
             self.log_queue.put(f"[done] exit code: {return_code}")

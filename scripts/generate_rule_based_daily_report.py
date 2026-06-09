@@ -9,9 +9,11 @@ from pathlib import Path
 try:
     from daily_report_builder import build_street_report, load_ledger_rows
     from daily_report_renderer import render_street_report_docx, render_street_report_docx_from_docxtpl
+    from convert_xls_to_xlsx import convert_with_excel
 except ModuleNotFoundError:
     from scripts.daily_report_builder import build_street_report, load_ledger_rows
     from scripts.daily_report_renderer import render_street_report_docx, render_street_report_docx_from_docxtpl
+    from scripts.convert_xls_to_xlsx import convert_with_excel
 
 
 def has_jinja_tags(path: Path) -> bool:
@@ -34,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--street", required=True, help="Street name, for example: \u6708\u575b\u8857\u9053.")
     parser.add_argument("-o", "--output", type=Path, required=True, help="Output .docx path.")
     parser.add_argument("--template", type=Path, default=None, help="Optional Jinja2 .docx template.")
+    parser.add_argument(
+        "--image-compression",
+        choices=("none", "light", "standard", "strong"),
+        default="standard",
+        help="Compression level for images inserted into the Word report.",
+    )
     return parser.parse_args()
 
 
@@ -54,9 +62,10 @@ def main() -> int:
                 report=report,
                 template_path=template,
                 output_path=args.output,
+                image_compression=args.image_compression,
             )
         else:
-            output = render_street_report_docx(report, args.output)
+            output = render_street_report_docx(report, args.output, image_compression=args.image_compression)
         
         print(f"[ok] output: {output}")
         return 0
@@ -78,17 +87,14 @@ def prepare_ledger(source: Path, output_dir: Path) -> Path:
     if ascii_xlsx.exists() and ascii_xlsx.stat().st_mtime >= ascii_xls.stat().st_mtime:
         return ascii_xlsx
 
-    import win32com.client
-
-    excel = win32com.client.DispatchEx("Excel.Application")
-    excel.Visible = False
-    excel.DisplayAlerts = False
-    try:
-        workbook = excel.Workbooks.Open(str(ascii_xls), ReadOnly=True)
-        workbook.SaveAs(str(ascii_xlsx), FileFormat=51)
-        workbook.Close(False)
-    finally:
-        excel.Quit()
+    failures = convert_with_excel(
+        jobs=[(ascii_xls, ascii_xlsx)],
+        overwrite=True,
+        visible=False,
+        verify_media=True,
+    )
+    if failures:
+        raise RuntimeError("Failed to convert .xls to .xlsx. See Excel COM error above.")
     return ascii_xlsx
 
 

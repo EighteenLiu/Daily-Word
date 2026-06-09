@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import re
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -16,6 +16,22 @@ IMAGE_WIDTH_CM = 10.2
 IMAGE_HEIGHT_CM = 5.74
 
 
+@dataclass(frozen=True)
+class ImageCompressionProfile:
+    width: int
+    height: int
+    quality: int
+
+
+IMAGE_COMPRESSION_PROFILES: dict[str, ImageCompressionProfile | None] = {
+    "none": None,
+    "light": ImageCompressionProfile(width=1920, height=1080, quality=88),
+    "standard": ImageCompressionProfile(width=1600, height=900, quality=82),
+    "strong": ImageCompressionProfile(width=1280, height=720, quality=72),
+}
+DEFAULT_IMAGE_COMPRESSION = "standard"
+
+
 def render_street_report_docx_from_docxtpl(
     report: Any,
     template_path: Path,
@@ -24,6 +40,7 @@ def render_street_report_docx_from_docxtpl(
     report_date_text: str = "",
     image_width_cm: float = IMAGE_WIDTH_CM,
     image_height_cm: float = IMAGE_HEIGHT_CM,
+    image_compression: str = DEFAULT_IMAGE_COMPRESSION,
 ) -> Path:
     """
     使用 docxtpl 直接渲染 Word 模板。
@@ -42,7 +59,7 @@ def render_street_report_docx_from_docxtpl(
 
         def convert(obj):
             if isinstance(obj, Path):
-                image_path = _docxtpl_image_path(obj, Path(temp_dir), image_cache)
+                image_path = _word_image_path(obj, Path(temp_dir), image_cache, image_compression)
                 if image_path:
                     return InlineImage(doc, str(image_path), width=Cm(image_width_cm), height=Cm(image_height_cm))
                 return ""
@@ -74,22 +91,53 @@ def render_street_report_docx_from_docxtpl(
     return output_path
 
 
-def _docxtpl_image_path(image_path: Path, temp_dir: Path, image_cache: dict[Path, Path]) -> Path | None:
+def _word_image_path(
+    image_path: Path,
+    temp_dir: Path,
+    image_cache: dict[Path, Path],
+    image_compression: str = DEFAULT_IMAGE_COMPRESSION,
+) -> Path | None:
     if image_path in image_cache:
         return image_cache[image_path]
     if not image_path.exists():
         return None
 
-    from PIL import Image
+    profile = image_compression_profile(image_compression)
+    if profile is None:
+        image_cache[image_path] = image_path
+        return image_path
 
-    output = temp_dir / f"image_{len(image_cache) + 1}.png"
+    from PIL import Image
+    from PIL import ImageOps
+
+    output = temp_dir / f"image_{len(image_cache) + 1}.jpg"
     try:
         with Image.open(image_path) as image:
-            image.convert("RGB").save(output, "PNG")
+            image = ImageOps.exif_transpose(image)
+            if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+                canvas = Image.new("RGB", image.size, (255, 255, 255))
+                canvas.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+                image = canvas
+            else:
+                image = image.convert("RGB")
+            target_size = (
+                min(profile.width, image.width),
+                min(profile.height, image.height),
+            )
+            if image.size != target_size:
+                image = image.resize(target_size, Image.Resampling.LANCZOS)
+            image.save(output, "JPEG", quality=profile.quality, optimize=True, progressive=True)
     except Exception:
         return None
     image_cache[image_path] = output
     return output
+
+
+def image_compression_profile(name: str | None) -> ImageCompressionProfile | None:
+    key = (name or DEFAULT_IMAGE_COMPRESSION).strip().lower()
+    if key not in IMAGE_COMPRESSION_PROFILES:
+        key = DEFAULT_IMAGE_COMPRESSION
+    return IMAGE_COMPRESSION_PROFILES[key]
 
 
 def _prepare_docxtpl_template(template_path: Path, output_path: Path) -> Path:
@@ -321,12 +369,16 @@ FONT_FANGSONG = "\u4eff\u5b8b"
 FONT_HEITI = "\u9ed1\u4f53"
 
 
-def render_street_report_docx(report: StreetReport, output_path: Path) -> Path:
+def render_street_report_docx(
+    report: StreetReport,
+    output_path: Path,
+    image_compression: str = DEFAULT_IMAGE_COMPRESSION,
+) -> Path:
     document = Document()
     _set_document_styles(document)
 
     with TemporaryDirectory(prefix="daily_report_images_") as temp_dir:
-        image_cache = ImageCache(Path(temp_dir))
+        image_cache = ImageCache(Path(temp_dir), image_compression=image_compression)
         if report.communities:
             _add_heading(document, "一、居住小区", level=1)
             section_index = 1
@@ -375,20 +427,21 @@ def render_street_report_docx(report: StreetReport, output_path: Path) -> Path:
 
 
 class ImageCache:
-    def __init__(self, temp_dir: Path) -> None:
+    def __init__(self, temp_dir: Path, image_compression: str = DEFAULT_IMAGE_COMPRESSION) -> None:
         self.temp_dir = temp_dir
+        self.image_compression = image_compression
         self.converted: dict[Path, Path] = {}
 
     def word_image_path(self, image_path: Path) -> Path:
-        if image_path in self.converted:
-            return self.converted[image_path]
-        from PIL import Image
-
-        output = self.temp_dir / f"{len(self.converted) + 1}.png"
-        with Image.open(image_path) as image:
-            image.convert("RGB").save(output, "PNG")
-        self.converted[image_path] = output
-        return output
+        prepared = _word_image_path(
+            image_path,
+            self.temp_dir,
+            self.converted,
+            self.image_compression,
+        )
+        if prepared is None:
+            raise FileNotFoundError(image_path)
+        return prepared
 
 
 def _render_units(document: Document, heading: str, units: list[UnitSection], image_cache: ImageCache) -> None:

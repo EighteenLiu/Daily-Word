@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import sys
+from collections import OrderedDict
 from pathlib import Path
+from typing import Iterable
 
 
 WORKSPACE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
@@ -53,6 +55,27 @@ def is_real_problem(text: str) -> bool:
     return not cleaned.startswith(no_problem_prefixes)
 
 
+def is_no_problem_summary(text: str) -> bool:
+    cleaned = clean_problem_number(text).strip("：:，,。；;、 ")
+    if not cleaned:
+        return True
+    no_problem_values = {
+        "无",
+        "无问题",
+        "没问题",
+        "未发现问题",
+        "未见问题",
+        "无明显问题",
+    }
+    return cleaned in no_problem_values
+
+
+def clean_report_problem_item(text: str) -> str:
+    text = clean_problem_number(text)
+    text = text.strip("：:，,。；;、 ")
+    return text
+
+
 def place_problem_texts(place) -> list[str]:
     texts: list[str] = []
     for block in place.blocks:
@@ -72,6 +95,93 @@ def count_real_problems(texts: list[str]) -> int:
             if is_real_problem(segment):
                 count += 1
     return count
+
+
+def street_report_problem_map(street_report_paths: Iterable[tuple[str, Path]]) -> "OrderedDict[str, OrderedDict[str, str]]":
+    result: OrderedDict[str, OrderedDict[str, str]] = OrderedDict()
+    for street, path in street_report_paths:
+        place_problems = extract_garbage_problem_texts_from_street_report(path)
+        if place_problems:
+            result[street] = place_problems
+    return result
+
+
+def extract_garbage_problem_texts_from_street_report(path: Path) -> "OrderedDict[str, str]":
+    from docx import Document
+
+    document = Document(path)
+    texts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+    communities: OrderedDict[str, list[str]] = OrderedDict()
+    current_place: str | None = None
+    in_community_section = False
+
+    for text in texts:
+        if text.startswith("一、居住小区"):
+            in_community_section = True
+            continue
+        if in_community_section and re.match(r"^[二三四五六七八九十]、", text):
+            break
+        if not in_community_section:
+            continue
+
+        place_match = re.fullmatch(r"（[一二三四五六七八九十]+）(.+)", text)
+        if place_match:
+            current_place = place_match.group(1).strip()
+            communities.setdefault(current_place, [])
+            continue
+        if not current_place:
+            continue
+
+        for item in _extract_problem_items_from_report_paragraph(text):
+            if item not in communities[current_place]:
+                communities[current_place].append(item)
+
+    return OrderedDict(
+        (place, _renumber_problem_items(items))
+        for place, items in communities.items()
+        if items
+    )
+
+
+def _extract_problem_items_from_report_paragraph(text: str) -> list[str]:
+    if "存在的问题是：" in text:
+        return _split_report_problem_items(text.split("存在的问题是：", 1)[1])
+    if "存在的问题：" in text:
+        return _split_report_problem_items(text.split("存在的问题：", 1)[1])
+
+    for label in ("小区宣传氛围：", "小区公示牌："):
+        if label in text:
+            return _split_report_problem_items(text.split(label, 1)[1])
+
+    station_match = re.search(r"([0-9A-Za-z一二三四五六七八九十]+号桶站设置情况)：(.+)$", text)
+    if station_match:
+        station_title = station_match.group(1)
+        return [
+            f"{station_title}：{item}"
+            for item in _split_report_problem_items(station_match.group(2))
+        ]
+    return []
+
+
+def _split_report_problem_items(text: str) -> list[str]:
+    text = text.strip()
+    if is_no_problem_summary(text):
+        return []
+    parts = split_problem_segments(text)
+    if not parts:
+        parts = [text]
+    items: list[str] = []
+    for part in parts:
+        item = clean_report_problem_item(part)
+        if item and not is_no_problem_summary(item):
+            items.append(item)
+    return items
+
+
+def _renumber_problem_items(items: list[str]) -> str:
+    if not items:
+        return "无问题"
+    return "；".join(f"（{index}）{item}" for index, item in enumerate(items, start=1)) + "。"
 
 
 def body_elements(document):
@@ -181,7 +291,13 @@ def chinese_day_prefix(report_date) -> str:
     return f"{report_date.value.month}\u6708{report_date.value.day}\u65e5"
 
 
-def write_garbage_summary(template_path: Path, reports: dict, report_date, output_dir: Path) -> Path:
+def write_garbage_summary(
+    template_path: Path,
+    reports: dict,
+    report_date,
+    output_dir: Path,
+    street_report_paths: list[tuple[str, Path]] | None = None,
+) -> Path:
     from docx import Document
     import split_street_daily_reports as split
 
@@ -209,27 +325,36 @@ def write_garbage_summary(template_path: Path, reports: dict, report_date, outpu
     remove_elements_between(document, insert_index, end_body_index)
 
     inserted = 0
+    if street_report_paths:
+        street_problem_map = street_report_problem_map(street_report_paths)
+        checked_street_count = len(street_report_paths)
+    else:
+        street_problem_map = OrderedDict()
+        for street, categories in reports.items():
+            places = categories.get(CN_COMMUNITY_CATEGORY, {})
+            place_problem_map = OrderedDict()
+            for place in places.values():
+                problem_text = merge_problem_texts(place_problem_texts(place))
+                if problem_text and not is_no_problem_summary(problem_text):
+                    place_problem_map[place.name] = problem_text
+            if place_problem_map:
+                street_problem_map[street] = place_problem_map
+        checked_street_count = len(reports)
+
     intro = (
         f"{report_date.chinese}\uff0c\u533a\u5783\u573e\u5206\u7c7b\u63a8\u8fdb\u5de5\u4f5c\u6307\u6325\u90e8\u529e\u516c\u5ba4"
-        f"\u5bf9\u897f\u57ce\u533a{len(reports)}\u4e2a\u8857\u9053\u751f\u6d3b\u5783\u573e\u5206\u7c7b\u65e5\u5e38\u8fd0\u884c\u60c5\u51b5"
+        f"\u5bf9\u897f\u57ce\u533a{checked_street_count}\u4e2a\u8857\u9053\u751f\u6d3b\u5783\u573e\u5206\u7c7b\u65e5\u5e38\u8fd0\u884c\u60c5\u51b5"
         f"\u8fdb\u884c\u91cd\u70b9\u62bd\u67e5\uff0c\u68c0\u67e5\u5b58\u5728\u7684\u95ee\u9898\u5982\u4e0b\uff1a"
         f"\uff08\u8be6\u89c1\u300a\u897f\u57ce\u533a\u751f\u6d3b\u5783\u573e\u5206\u7c7b\u65e5\u5e38\u8fd0\u884c\u68c0\u67e5\u62a5\u544a-{report_date.chinese}\u300b\uff0c"
         f"\u8bf7\u76f8\u5173\u8857\u9053\u8ba4\u771f\u5206\u6790\uff0c\u5e76\u4e8e3\u65e5\u5185\u5b8c\u6210\u6574\u6539\uff09\u3002"
     )
     add_text_paragraph_at(document, insert_index + inserted, intro, FONT_FANGSONG_GB2312, 16, document.styles["Normal"])
     inserted += 1
-    for street_index, (street, categories) in enumerate(reports.items(), start=1):
-        places = categories.get(CN_COMMUNITY_CATEGORY, {})
-        if not places:
-            continue
+    for street_index, (street, places) in enumerate(street_problem_map.items(), start=1):
         add_street_heading_at(document, insert_index + inserted, f"\uff08{chinese_numeral(street_index)}\uff09{street}")
         inserted += 1
-        for place in places.values():
-            problem_text = merge_problem_texts(place_problem_texts(place))
-            if problem_text:
-                add_place_problem_at(document, insert_index + inserted, place.name, problem_text)
-            else:
-                add_place_problem_at(document, insert_index + inserted, place.name, "\u65e0\u95ee\u9898")
+        for place_name, problem_text in places.items():
+            add_place_problem_at(document, insert_index + inserted, place_name, problem_text)
             inserted += 1
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -279,11 +404,20 @@ def write_summaries(
     garbage_template: Path | None = None,
     daily_template: Path | None = None,
     output_dir: Path | None = None,
+    street_report_paths: list[tuple[str, Path]] | None = None,
 ) -> list[Path]:
     output_dir = output_dir or default_summary_output_dir(report_date)
     written: list[Path] = []
     if garbage_template:
-        written.append(write_garbage_summary(garbage_template, reports, report_date, output_dir))
+        written.append(
+            write_garbage_summary(
+                garbage_template,
+                reports,
+                report_date,
+                output_dir,
+                street_report_paths=street_report_paths,
+            )
+        )
     if daily_template:
         written.append(write_daily_summary(daily_template, reports, report_date, output_dir))
     return written

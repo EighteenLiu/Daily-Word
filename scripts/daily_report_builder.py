@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import random
+import struct
 import zipfile
 import bisect
 import hashlib
@@ -77,7 +78,9 @@ class CommunitySection:
     overall_problem_summary: str
     overall_intro: str = ""
     promo_images: list[Path] = field(default_factory=list)
+    promo_text: str = ""
     notice_board_images: list[Path] = field(default_factory=list)
+    notice_board_text: str = ""
     is_pure_box_room: bool = False
     stations: list[StationSection] = field(default_factory=list)
     resident_delivery: ResidentDeliverySection | None = None
@@ -239,6 +242,11 @@ def _attach_row_images(rows: list[LedgerRow], images: Iterable[RowImage], image_
 def extract_xls_original_row_images(xls_path: Path, xlsx_path: Path, sheet_name: str) -> list[RowImage]:
     anchored_images = extract_xlsx_row_images(xlsx_path, sheet_name)
     original_images = extract_xls_embedded_images(xls_path)
+    if not anchored_images and original_images:
+        return extract_xls_row_images_from_biff(
+            xls_path,
+            image_columns=_xlsx_image_columns(xlsx_path, sheet_name),
+        )
     if not anchored_images or not original_images:
         return []
 
@@ -280,6 +288,81 @@ def extract_xls_original_row_images(xls_path: Path, xlsx_path: Path, sheet_name:
             )
         )
     return replaced
+
+
+def extract_xls_row_images_from_biff(path: Path, image_columns: set[int] | None = None) -> list[RowImage]:
+    try:
+        import olefile
+    except ImportError:
+        return []
+
+    try:
+        ole = olefile.OleFileIO(str(path))
+    except Exception:
+        return []
+    try:
+        workbook_data = b""
+        for stream in ole.listdir(streams=True, storages=False):
+            if stream[-1] in {"Workbook", "Book"}:
+                workbook_data = ole.openstream(stream).read()
+                break
+    finally:
+        ole.close()
+    if not workbook_data:
+        return []
+
+    anchors = _scan_biff_image_anchors(workbook_data)
+    if image_columns:
+        anchors = [(row, column) for row, column in anchors if column in image_columns]
+    original_images = extract_xls_embedded_images(path)
+    if not anchors or not original_images:
+        return []
+
+    row_images: list[RowImage] = []
+    for index, (row_number, column_number) in enumerate(anchors):
+        if index >= len(original_images):
+            break
+        original = original_images[index]
+        row_images.append(
+            RowImage(
+                row_number=row_number,
+                column_number=column_number,
+                media_name=f"xls_anchor_{index + 1}|{original.media_name}",
+                suffix=original.suffix,
+                data=original.data,
+            )
+        )
+    return row_images
+
+
+def _xlsx_image_columns(path: Path, sheet_name: str) -> set[int]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            sheets = _workbook_sheet_map(archive)
+            sheet_path = sheets.get(sheet_name)
+            if not sheet_path:
+                return FALLBACK_IMAGE_COLUMNS
+            return _image_columns_for_sheet(archive, sheet_path)
+    except Exception:
+        return FALLBACK_IMAGE_COLUMNS
+
+
+def _scan_biff_image_anchors(data: bytes) -> list[tuple[int, int]]:
+    anchors: list[tuple[int, int]] = []
+    for index in range(0, max(0, len(data) - 30)):
+        if data[index + 2 : index + 4] != b"\x10\xf0":
+            continue
+        length = struct.unpack_from("<I", data, index + 4)[0]
+        if length < 18 or length > 32 or index + 8 + length > len(data):
+            continue
+        payload = data[index + 8 : index + 8 + length]
+        try:
+            _flag, col1, _dx1, row1, _dy1, col2, _dx2, row2, _dy2 = struct.unpack_from("<HHHHHHHHH", payload, 0)
+        except struct.error:
+            continue
+        if 0 <= row1 < 5000 and 0 <= col1 < 300 and row2 >= row1 and col2 >= col1:
+            anchors.append((row1 + 1, col1 + 1))
+    return anchors
 
 
 def _pair_xls_images_by_order(anchored_images: list[RowImage], original_images: list[EmbeddedImage]) -> list[RowImage]:
@@ -691,6 +774,8 @@ def is_no_problem(text: str) -> bool:
         "均有设置",
         "已核实",
         "不是箱房小区",
+        "没有智能可回收垃圾箱",
+        "无智能可回收垃圾箱",
     )
     if normalized.isdigit():
         return True
@@ -706,6 +791,7 @@ def clean_problem_text(text: str) -> str:
     text = re.sub(r"^无问题[，,。；;、（）()本小区今天一共检查了0-9个容器纯箱房小区]*", "", text)
     text = re.sub(r"（?本小区.*?容器。?）?", "", text)
     text = re.sub(r"本小区(?:今天)?(?:一共)?检查了?\d+个容器", "", text)
+    text = re.sub(r"数量\d+个", "", text)
     text = re.sub(r"(?:本小区|小区)?(?:有|共)?\d+个(?:垃圾桶|容器)", "", text)
     text = re.sub(r"\d+个(?:垃圾桶|容器)", "", text)
     text = text.replace("。", "").replace("；", "")
@@ -864,7 +950,9 @@ def _build_communities(rows: list[LedgerRow]) -> list[CommunitySection]:
             overall_problem_summary=summarize_problem_rows(overall_rows),
             overall_intro="",
             promo_images=_images_for_indicator(place_rows, "小区宣传"),
+            promo_text=_indicator_problem_text(place_rows, "小区宣传"),
             notice_board_images=_images_for_indicator(place_rows, "小区公示牌"),
+            notice_board_text=_indicator_problem_text(place_rows, "小区公示牌"),
             is_pure_box_room=is_pure_box_room,
             stations=_build_pure_box_station_sections(place_rows) if is_pure_box_room else _build_station_sections(place_rows),
             resident_delivery=_build_resident_delivery(place_rows),
@@ -946,6 +1034,10 @@ def _build_pure_box_station_sections(rows: list[LedgerRow]) -> list[StationSecti
     return [StationSection(title="1号桶站设置情况", station_no="1", problem_summary="无问题", images=station_images)]
 
 
+def _indicator_problem_text(rows: list[LedgerRow], keyword: str) -> str:
+    return summarize_station_problem_rows(row for row in rows if keyword in row.indicator2)
+
+
 def summarize_station_problem_texts(texts: Iterable[str]) -> str:
     summary = summarize_problem_texts(texts)
     if summary == "无问题。":
@@ -954,12 +1046,35 @@ def summarize_station_problem_texts(texts: Iterable[str]) -> str:
 
 
 def summarize_station_problem_rows(rows: Iterable[LedgerRow]) -> str:
-    summary = summarize_problem_rows(rows)
-    if summary == "无问题。":
+    problems: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        problem = station_problem_text_from_row(row)
+        if not problem or problem in seen:
+            continue
+        seen.add(problem)
+        problems.append(problem)
+    if not problems:
         return "无问题"
-    if "；" not in summary:
-        return re.sub(r"^（1）(.+?)1处。$", r"\1", summary)
-    return summary
+    if len(problems) == 1:
+        return problems[0]
+    return "；".join(f"（{index}）{problem}" for index, problem in enumerate(problems, start=1)) + "。"
+
+
+def station_problem_text_from_row(row: LedgerRow) -> str:
+    if is_no_problem(row.problem) and is_no_problem(row.indicator3):
+        return ""
+    indicator3 = clean_station_indicator_text(row.indicator3)
+    if indicator3:
+        return indicator3
+    return clean_station_indicator_text(effective_problem_text(row))
+
+
+def clean_station_indicator_text(text: str) -> str:
+    text = clean_problem_text(text)
+    text = re.sub(r"\d+处$", "", text)
+    text = text.removesuffix("一处")
+    return text.strip("：:，,。；;、 ")
 
 
 def station_number_from_problem(text: str) -> str | None:
