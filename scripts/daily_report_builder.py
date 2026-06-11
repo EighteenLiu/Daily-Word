@@ -772,6 +772,7 @@ def is_no_problem(text: str) -> bool:
         "未发现问题",
         "有宣传氛围",
         "均有设置",
+        "设施齐全",
         "已核实",
         "不是箱房小区",
         "该小区是纯箱房小区",
@@ -781,7 +782,7 @@ def is_no_problem(text: str) -> bool:
     )
     if normalized.isdigit():
         return True
-    if normalized in {"有", "无", "投放正确"}:
+    if normalized in {"有", "无", "五", "投放正确"}:
         return True
     return any(marker in normalized for marker in no_problem_markers) and not any(
         marker in normalized for marker in ("不洁", "不准确", "站外摆桶", "不齐全", "无宣传")
@@ -790,6 +791,8 @@ def is_no_problem(text: str) -> bool:
 
 def clean_problem_text(text: str) -> str:
     text = display_text(text)
+    if _has_container_count_segment(text):
+        return ""
     text = re.sub(r"^无问题[，,。；;、（）()本小区今天一共检查了0-9个容器纯箱房小区]*", "", text)
     text = re.sub(r"（?本小区.*?容器。?）?", "", text)
     text = re.sub(r"本小区(?:今天)?(?:一共)?检查了?\d+个容器", "", text)
@@ -797,13 +800,21 @@ def clean_problem_text(text: str) -> str:
     text = re.sub(r"(?:本小区|小区)?(?:有|共)?\d+个(?:垃圾桶|容器)", "", text)
     text = re.sub(r"\d+个(?:垃圾桶|容器)", "", text)
     text = text.replace("。", "").replace("；", "")
-    station_match = re.search(r"([0-9A-Za-z]+|[一二三四五六七八九十]+)(?:号)?桶站(.+)$", text)
-    if station_match:
-        text = station_match.group(2)
+    text = _strip_station_references(text)
     text = text.strip("：:，,。；;、 ")
     if is_no_problem(text):
         return ""
     return text
+
+
+def _has_container_count_segment(text: str) -> bool:
+    text = display_text(text)
+    return bool(
+        re.search(r"(?:容器数量|各容器数量|检查[^，,。；;、]*容器数量?)\d+个", text)
+        or re.search(r"容器检查\d+个", text)
+        or re.search(r"容器\d+个", text)
+        or re.search(r"\d+个容器", text)
+    )
 
 
 def _is_inspection_count_text(text: str) -> bool:
@@ -813,6 +824,8 @@ def _is_inspection_count_text(text: str) -> bool:
 
 
 def effective_problem_text(row: LedgerRow) -> str:
+    if _indicator3_overrides_problem_as_no_problem(row):
+        return ""
     problem = clean_problem_text(row.problem)
     indicator3 = clean_problem_text(row.indicator3)
     if "小区公示牌" in row.indicator2:
@@ -833,6 +846,30 @@ def effective_problem_text(row: LedgerRow) -> str:
     if problem.isdigit() and not indicator3.isdigit():
         return indicator3
     return problem
+
+
+def community_overall_problem_text(row: LedgerRow) -> str:
+    if _indicator3_overrides_problem_as_no_problem(row):
+        return ""
+    if _is_resident_error(row):
+        return "居民自主投放不准确"
+    indicator3_raw = display_text(row.indicator3)
+    if indicator3_raw and is_no_problem(indicator3_raw):
+        return ""
+    indicator3 = clean_problem_text(row.indicator3)
+    if indicator3:
+        return indicator3
+    return clean_problem_text(row.problem)
+
+
+def _indicator3_overrides_problem_as_no_problem(row: LedgerRow) -> bool:
+    indicator2 = display_text(row.indicator2)
+    indicator3 = normalize_text(row.indicator3)
+    return (
+        ("小区宣传引导" in indicator2 and indicator3 == "有宣传氛围")
+        or ("小区公示牌" in indicator2 and indicator3 in {"良好，未发现问题", "良好,未发现问题"})
+        or (_is_resident_delivery_row(row) and indicator3 == "投放正确")
+    )
 
 
 def problem_with_count(text: str) -> str:
@@ -913,11 +950,21 @@ def _problem_weight(row: LedgerRow, problem: str) -> int:
         and "其他投厨余" in row.problem
     ):
         return 2
-    return 1
+    if problem == "居民自主投放不准确":
+        return 1
+    return _problem_count_from_problem(row.problem) or 1
+
+
+def _problem_count_from_problem(text: str) -> int | None:
+    text = display_text(text)
+    matches = re.findall(r"([0-9一二三四五六七八九十]+)处", text)
+    if not matches:
+        return None
+    return _parse_count_token(matches[-1])
 
 
 def build_street_report(rows: list[LedgerRow], street: str) -> StreetReport:
-    street_rows = [row for row in rows if row.street == street]
+    street_rows = [row for row in rows if row.street == street and not _is_ignored_row(row)]
     report = StreetReport(street=street)
     grouped: dict[str, list[LedgerRow]] = defaultdict(list)
     for row in street_rows:
@@ -935,6 +982,10 @@ def _group_by_place(rows: list[LedgerRow]) -> dict[str, list[LedgerRow]]:
     for row in rows:
         grouped.setdefault(row.place, []).append(row)
     return grouped
+
+
+def _is_ignored_row(row: LedgerRow) -> bool:
+    return display_text(row.indicator2).strip() == "检查时段"
 
 
 def _build_communities(rows: list[LedgerRow]) -> list[CommunitySection]:
@@ -964,22 +1015,25 @@ def _build_communities(rows: list[LedgerRow]) -> list[CommunitySection]:
 
 
 def _overall_problem_rows(rows: list[LedgerRow]) -> list[LedgerRow]:
-    return list(rows)
+    return [row for row in rows if not _is_ignored_row(row)]
 
 
 def summarize_community_problem_rows(rows: Iterable[LedgerRow], prefer_station_indicators: bool = False) -> str:
+    rows = [row for row in rows if not _is_ignored_row(row)]
     ordered: list[str] = []
     counts: dict[str, int] = {}
     for row in rows:
-        if is_no_problem(row.problem) and not _indicator3_can_define_problem(row):
+        if not _is_resident_error(row) and is_no_problem(row.problem):
             continue
-        if _is_positive_indicator_result(row):
-            continue
-        if prefer_station_indicators and _is_station_setting_row(row):
-            problem = station_problem_text_from_row(row)
-        else:
-            problem = effective_problem_text(row)
+        problem = community_overall_problem_text(row)
         if not problem:
+            continue
+        if problem == "居民自主投放不准确":
+            if problem in counts:
+                continue
+            resident_error_rows = [item for item in rows if _is_resident_error(item)]
+            ordered.append(problem)
+            counts[problem] = _resident_inaccurate_count(resident_error_rows)
             continue
         if problem not in counts:
             ordered.append(problem)
@@ -1017,30 +1071,91 @@ def _is_pure_box_room(place: str, rows: list[LedgerRow]) -> bool:
 
 
 def _build_station_sections(rows: list[LedgerRow]) -> list[StationSection]:
-    fallback_rows = _non_resident_rows(rows)
-    station_rows = [
-        row
-        for row in fallback_rows
-        if _is_station_setting_row(row)
-    ]
+    rows = [row for row in rows if not _is_ignored_row(row)]
+    station_rows = _station_rows_with_explicit_number(rows)
     if not station_rows:
-        return []
-    return _build_station_sections_from_rows(station_rows, fallback_rows)
+        return _build_default_station_sections(rows)
+    return _build_station_sections_from_rows(station_rows, _non_resident_rows(rows))
 
 
 def _is_station_setting_row(row: LedgerRow) -> bool:
+    if _is_ignored_row(row):
+        return False
     if _is_resident_delivery_row(row):
         return False
-    return station_number_from_problem(row.problem) is not None
+    return bool(station_numbers_from_problem(row.problem))
+
+
+def _station_rows_with_explicit_number(rows: list[LedgerRow]) -> list[LedgerRow]:
+    rows_with_station_no = [row for row in rows if _is_station_setting_row(row)]
+    preferred_rows = [row for row in rows_with_station_no if _is_station_problem_indicator_row(row)]
+    if preferred_rows:
+        return sorted(preferred_rows, key=_station_indicator_priority)
+    return rows_with_station_no
+
+
+def _is_station_problem_indicator_row(row: LedgerRow) -> bool:
+    indicator = display_text(row.indicator2)
+    return any(keyword in indicator for keyword in _station_problem_indicator_keywords())
+
+
+def _station_problem_indicator_keywords() -> tuple[str, ...]:
+    return (
+        "投放点环境",
+        "容器成组设置",
+        "桶站便利性措施",
+        "投放点公示牌",
+        "早、晚高峰",
+        "投放时段开盖",
+        "灭蝇蚊、地面防滑设备",
+        "灭蚊蝇、地面防滑设备",
+    )
+
+
+def _station_indicator_priority(row: LedgerRow) -> tuple[int, int]:
+    if "投放点环境" in display_text(row.indicator2):
+        return (0, row.row_number)
+    return (1, row.row_number)
+
+
+def _build_default_station_sections(rows: list[LedgerRow]) -> list[StationSection]:
+    default_rows = _default_station_problem_rows(rows)
+    return [
+        StationSection(
+            title="1号桶站设置情况",
+            station_no="1",
+            problem_summary=summarize_station_problem_rows(default_rows),
+            images=_collect_images(_default_station_image_rows(rows, default_rows)),
+        )
+    ]
+
+
+def _default_station_problem_rows(rows: list[LedgerRow]) -> list[LedgerRow]:
+    station_rows = [
+        row
+        for row in rows
+        if _is_station_problem_indicator_row(row)
+        and not _is_resident_delivery_row(row)
+        and station_problem_text_from_row(row)
+    ]
+    return sorted(station_rows, key=_station_indicator_priority)
+
+
+def _default_station_image_rows(rows: list[LedgerRow], problem_rows: list[LedgerRow]) -> list[LedgerRow]:
+    if problem_rows:
+        return problem_rows
+    return [row for row in rows if _is_default_station_environment_row(row)]
+
+
+def _is_default_station_environment_row(row: LedgerRow) -> bool:
+    return "投放点环境" in display_text(row.indicator2)
 
 
 def _build_station_sections_from_rows(station_rows: list[LedgerRow], fallback_rows: list[LedgerRow]) -> list[StationSection]:
     grouped: dict[str, list[LedgerRow]] = defaultdict(list)
     for row in station_rows:
-        station_no = station_number_from_problem(row.problem)
-        if not station_no:
-            continue
-        grouped[station_no].append(row)
+        for station_no in station_numbers_from_problem(row.problem):
+            grouped[station_no].append(row)
     sections: list[StationSection] = []
     for station_no, group in grouped.items():
         summary = summarize_station_problem_rows(group)
@@ -1070,16 +1185,14 @@ def _station_sort_key(station_no: str) -> tuple[int, str] | None:
 
 
 def _build_pure_box_station_sections(rows: list[LedgerRow]) -> list[StationSection]:
-    fallback_rows = _non_resident_rows(rows)
-    station_rows = [
-        row
-        for row in fallback_rows
-        if _is_station_setting_row(row)
-    ]
+    rows = [row for row in rows if not _is_ignored_row(row)]
+    station_rows = _station_rows_with_explicit_number(rows)
     if station_rows:
-        return _build_station_sections_from_rows(station_rows, fallback_rows)
-    station_images = _images_with_minimum(station_rows, fallback_rows, minimum=3)
-    return [StationSection(title="1号桶站设置情况", station_no="1", problem_summary="无问题", images=station_images)]
+        return _build_station_sections_from_rows(station_rows, _non_resident_rows(rows))
+    default_sections = _build_default_station_sections(rows)
+    if default_sections:
+        return default_sections
+    return [StationSection(title="1号桶站设置情况", station_no="1", problem_summary="无问题", images=[])]
 
 
 def _indicator_problem_text(rows: list[LedgerRow], keyword: str) -> str:
@@ -1124,11 +1237,14 @@ def summarize_station_problem_rows(rows: Iterable[LedgerRow]) -> str:
         return "无问题"
     if len(problems) == 1:
         return problems[0]
-    return "；".join(f"（{index}）{problem}" for index, problem in enumerate(problems, start=1)) + "。"
+    return "、".join(problems)
 
 
 def station_problem_text_from_row(row: LedgerRow) -> str:
     if is_no_problem(row.problem) and is_no_problem(row.indicator3):
+        return ""
+    indicator3_raw = display_text(row.indicator3)
+    if indicator3_raw and is_no_problem(indicator3_raw):
         return ""
     indicator3 = clean_station_indicator_text(row.indicator3)
     if indicator3:
@@ -1144,8 +1260,59 @@ def clean_station_indicator_text(text: str) -> str:
 
 
 def station_number_from_problem(text: str) -> str | None:
-    match = re.search(r"([0-9A-Za-z一二三四五六七八九十]+)(?:号)?桶站", display_text(text))
-    return _normalize_station_no(match.group(1)) if match else None
+    numbers = station_numbers_from_problem(text)
+    return numbers[0] if numbers else None
+
+
+def station_numbers_from_problem(text: str) -> list[str]:
+    text = display_text(text)
+    numbers: list[str] = []
+    seen: set[str] = set()
+
+    def add_number(raw: str) -> None:
+        normalized = _normalize_station_no(re.sub(r"号$", "", raw.strip()))
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            numbers.append(normalized)
+
+    element = _station_number_element_pattern()
+    separator = _station_number_separator_pattern()
+    station_ref = rf"(?P<group>{element}(?:{separator}{element})*)\s*[）)]?\s*(?:号)?桶站"
+    for match in re.finditer(station_ref, text):
+        group = match.group("group")
+        for raw in re.split(separator, group):
+            add_number(raw)
+    bare_number_ref = rf"^[（(]?\s*(?P<number>{_station_number_core_pattern()})\s*号\s*[）)]?\s*(?=无问题|周边|满冒|外摆|混投|散桶|不洁|未|无|有害|厨余|其他|可回收|桶|垃圾|公示牌|投放|破损)"
+    match = re.search(bare_number_ref, text)
+    if match:
+        add_number(match.group("number"))
+    return numbers
+
+
+def _strip_station_references(text: str) -> str:
+    element = _station_number_element_pattern()
+    separator = _station_number_separator_pattern()
+    station_ref = rf"[（(]?\s*(?:{element}(?:{separator}{element})*)\s*[）)]?\s*(?:号)?桶站\s*[）)]?"
+    matches = list(re.finditer(station_ref, text))
+    if matches:
+        return text[matches[-1].end():]
+    bare_number_ref = rf"^[（(]?\s*{_station_number_core_pattern()}\s*号\s*[）)]?"
+    match = re.search(bare_number_ref, text)
+    if match:
+        return text[match.end():]
+    return text
+
+
+def _station_number_element_pattern() -> str:
+    return rf"(?:{_station_number_core_pattern()})(?:号)?"
+
+
+def _station_number_core_pattern() -> str:
+    return r"(?:0*\d+[A-Za-z]?|[一二三四五六七八九十]+[A-Za-z]?)"
+
+
+def _station_number_separator_pattern() -> str:
+    return r"\s*(?:、|,|，|\.|．|/|和|及|与|\+)\s*"
 
 
 def _normalize_station_no(station_no: str) -> str:
@@ -1157,21 +1324,64 @@ def _normalize_station_no(station_no: str) -> str:
 
 
 def _build_resident_delivery(rows: list[LedgerRow]) -> ResidentDeliverySection | None:
-    resident_rows = [row for row in rows if "居民自主投放" in row.indicator2]
+    resident_rows = [row for row in rows if _is_resident_delivery_row(row) and not _is_ignored_row(row)]
     if not resident_rows:
-        return None
-    inaccurate = sum(_problem_weight(row, "居民自主投放不准确") for row in resident_rows if _is_resident_error(row))
-    if inaccurate == 0:
         return None
     error_rows = [
         row
         for row in resident_rows
         if _is_resident_error(row)
     ]
+    if not error_rows:
+        return None
+    inaccurate = _resident_inaccurate_count(error_rows)
     return ResidentDeliverySection(summary=f"居民投放共5个，其中不准确{inaccurate}个。", error_images=_collect_images(error_rows))
 
 
+def _resident_inaccurate_count(rows: list[LedgerRow]) -> int:
+    if len(rows) == 1:
+        count = _resident_inaccurate_count_from_problem(rows[0].problem)
+        if count is not None:
+            return count
+    return len(rows)
+
+
+def _resident_inaccurate_count_from_problem(text: str) -> int | None:
+    text = display_text(text)
+    matches = re.findall(r"([0-9一二三四五六七八九十]+)[处个]", text)
+    if not matches:
+        return None
+    return _parse_count_token(matches[-1])
+
+
+def _parse_count_token(token: str) -> int:
+    if token.isdigit():
+        return int(token)
+    numerals = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    if token == "十":
+        return 10
+    if token.startswith("十"):
+        return 10 + numerals.get(token[1:], 0)
+    if "十" in token:
+        left, right = token.split("十", 1)
+        return numerals.get(left, 0) * 10 + numerals.get(right, 0)
+    return numerals.get(token, 1)
+
+
 def _is_resident_error(row: LedgerRow) -> bool:
+    if _indicator3_overrides_problem_as_no_problem(row):
+        return False
     return (
         "投放错误" in row.problem
         or "不准确" in row.problem
@@ -1181,7 +1391,7 @@ def _is_resident_error(row: LedgerRow) -> bool:
 
 
 def _is_resident_delivery_row(row: LedgerRow) -> bool:
-    return "居民自主投放" in row.indicator2
+    return "居民自主投放" in row.indicator2 or "居民投放" in row.indicator2
 
 
 def _non_resident_rows(rows: Iterable[LedgerRow]) -> list[LedgerRow]:
@@ -1281,27 +1491,44 @@ def _dedupe_report_images(report: StreetReport) -> None:
     for community in report.communities:
         community.promo_images = _dedupe_images_by_content(community.promo_images, seen)
         community.notice_board_images = _dedupe_images_by_content(community.notice_board_images, seen)
+        resident_keys: set[str] = set()
         if community.resident_delivery:
             community.resident_delivery.error_images = _dedupe_images_by_content(
                 community.resident_delivery.error_images,
                 seen,
             )
+            resident_keys = {_image_content_key(image) for image in community.resident_delivery.error_images}
         for station in community.stations:
-            station.images = _dedupe_images_by_content(station.images, seen)
+            station.images = _dedupe_images_by_content(
+                station.images,
+                seen,
+                preserve_first_if_all_seen=True,
+                preserve_blocked_keys=resident_keys,
+            )
 
     for unit in report.restaurants + report.social_units:
         unit.promo_images = _dedupe_images_by_content(unit.promo_images, seen)
         unit.container_images = _dedupe_images_by_content(unit.container_images, seen)
 
 
-def _dedupe_images_by_content(images: Iterable[Path], seen: set[str]) -> list[Path]:
+def _dedupe_images_by_content(
+    images: Iterable[Path],
+    seen: set[str],
+    preserve_first_if_all_seen: bool = False,
+    preserve_blocked_keys: set[str] | None = None,
+) -> list[Path]:
     unique: list[Path] = []
+    skipped: list[Path] = []
     for image in images:
         key = _image_content_key(image)
         if key in seen:
+            if not preserve_blocked_keys or key not in preserve_blocked_keys:
+                skipped.append(image)
             continue
         seen.add(key)
         unique.append(image)
+    if not unique and preserve_first_if_all_seen and skipped:
+        unique.append(skipped[0])
     return unique
 
 
