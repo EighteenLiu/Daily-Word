@@ -52,6 +52,10 @@ def add_image_loop(document: Document, loop_var: str, image_var: str = "image") 
     add_jinja(document, "{%p endfor %}")
 
 
+def section_title(name: str) -> str:
+    return "{{ ['','一','二','三','四','五','六','七','八','九','十'][section_no.n] }}、" + name
+
+
 def build() -> None:
     document = Document()
     section = document.sections[0]
@@ -69,13 +73,15 @@ def build() -> None:
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_para(document, "{{ report_date_text }}", font=FONT_SONG, size=12)
 
+    add_jinja(document, "{%p set section_no = namespace(n=0) %}")
     add_jinja(document, "{%p if communities %}")
-    add_heading(document, "一、居住小区", level=1)
+    add_jinja(document, "{%p set section_no.n = section_no.n + 1 %}")
+    add_heading(document, section_title("居住小区"), level=1)
     add_jinja(document, "{%p for community in communities %}")
     add_heading(document, "（{{ community.index_cn }}）{{ community.name }}", level=2)
     add_heading(document, "1.小区整体情况", level=3)
     add_para(document, "{{ community.overall_intro }}存在的问题是：{{ community.overall_problem_summary }}")
-    add_para(document, "（1）小区宣传氛围：")
+    add_para(document, "（1）小区宣传氛围：{% if community.promo_text != \"无问题\" %}{{ community.promo_text }}{% endif %}")
     add_image_loop(document, "community.promo_images")
     add_para(document, "（2）小区公示牌：")
     add_image_loop(document, "community.notice_board_images")
@@ -98,12 +104,13 @@ def build() -> None:
     add_jinja(document, "{%p endif %}")
 
     add_jinja(document, "{%p if restaurants %}")
-    add_heading(document, "{{ '二' if communities else '一' }}、餐饮单位", level=1)
+    add_jinja(document, "{%p set section_no.n = section_no.n + 1 %}")
+    add_heading(document, section_title("餐饮单位"), level=1)
     add_jinja(document, "{%p for restaurant in restaurants %}")
     add_heading(document, "（{{ restaurant.index_cn }}）{{ restaurant.name }}", level=2)
     add_heading(document, "1.整体情况", level=3)
     add_para(document, "存在的问题是：{{ restaurant.overall_problem_summary }}")
-    add_para(document, "（1）宣传氛围：{{ restaurant.promo_text }}")
+    add_para(document, "（1）宣传氛围：{% if restaurant.promo_text != \"无问题\" %}{{ restaurant.promo_text }}{% endif %}")
     add_image_loop(document, "restaurant.promo_images")
     add_heading(document, "2.桶站设置情况：{{ restaurant.container_problem_summary }}", level=3)
     add_image_loop(document, "restaurant.container_images")
@@ -111,15 +118,33 @@ def build() -> None:
     add_jinja(document, "{%p endif %}")
 
     add_jinja(document, "{%p if social_units %}")
-    add_heading(document, "{{ '三' if communities and restaurants else '二' if communities or restaurants else '一' }}、社会单位", level=1)
+    add_jinja(document, "{%p set section_no.n = section_no.n + 1 %}")
+    add_heading(document, section_title("社会单位"), level=1)
     add_jinja(document, "{%p for social_unit in social_units %}")
     add_heading(document, "（{{ social_unit.index_cn }}）{{ social_unit.name }}", level=2)
     add_heading(document, "1.整体情况", level=3)
     add_para(document, "存在的问题是：{{ social_unit.overall_problem_summary }}")
-    add_para(document, "（1）宣传氛围：{{ social_unit.promo_text }}")
+    add_para(document, "（1）宣传氛围：{% if social_unit.promo_text != \"无问题\" %}{{ social_unit.promo_text }}{% endif %}")
     add_image_loop(document, "social_unit.promo_images")
     add_heading(document, "2.桶站设置情况：{{ social_unit.container_problem_summary }}", level=3)
     add_image_loop(document, "social_unit.container_images")
+    add_jinja(document, "{%p endfor %}")
+    add_jinja(document, "{%p endif %}")
+
+    add_jinja(document, "{%p if outside_bucket_issues %}")
+    add_jinja(document, "{%p set section_no.n = section_no.n + 1 %}")
+    add_heading(document, section_title("桶外摆检查"), level=1)
+    add_jinja(document, "{%p for issue in outside_bucket_issues %}")
+    add_para(document, "{{ issue.street_name }}：{{ issue.clean_text }}")
+    add_jinja(document, "{%p for row in issue.image_rows %}")
+    paragraph = add_para(
+        document,
+        "{{ row[0] }}{% if row|length > 1 %}\t{{ row[1] }}{% endif %}",
+        font=FONT_FANGSONG,
+        size=12,
+    )
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    add_jinja(document, "{%p endfor %}")
     add_jinja(document, "{%p endfor %}")
     add_jinja(document, "{%p endif %}")
 

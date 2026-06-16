@@ -38,6 +38,7 @@ def render_street_report_docx_from_docxtpl(
     output_path: Path,
     report_title: str = "",
     report_date_text: str = "",
+    outside_bucket_issues: list[Any] | None = None,
     image_width_cm: float = IMAGE_WIDTH_CM,
     image_height_cm: float = IMAGE_HEIGHT_CM,
     image_compression: str = DEFAULT_IMAGE_COMPRESSION,
@@ -57,38 +58,44 @@ def render_street_report_docx_from_docxtpl(
         doc = DocxTemplate(str(prepared_template))
         image_cache: dict[Path, Path] = {}
 
-        def convert(obj):
+        def convert(obj, width_cm: float = image_width_cm, height_cm: float = image_height_cm):
             if isinstance(obj, Path):
                 image_path = _word_image_path(obj, Path(temp_dir), image_cache, image_compression)
                 if image_path:
-                    return InlineImage(doc, str(image_path), width=Cm(image_width_cm), height=Cm(image_height_cm))
+                    return InlineImage(doc, str(image_path), width=Cm(width_cm), height=Cm(height_cm))
                 return ""
 
             if isinstance(obj, list):
-                return [convert(item) for item in obj]
+                return [convert(item, width_cm, height_cm) for item in obj]
 
             if isinstance(obj, tuple):
-                return [convert(item) for item in obj]
+                return [convert(item, width_cm, height_cm) for item in obj]
 
             if isinstance(obj, dict):
-                return {key: convert(value) for key, value in obj.items()}
+                return {key: convert(value, width_cm, height_cm) for key, value in obj.items()}
 
             if is_dataclass(obj):
-                return {
-                    field.name: convert(getattr(obj, field.name))
+                converted = {
+                    field.name: convert(getattr(obj, field.name), width_cm, height_cm)
                     for field in fields(obj)
                 }
+                if hasattr(obj, "image_rows"):
+                    converted["image_rows"] = convert(getattr(obj, "image_rows"), width_cm, height_cm)
+                if hasattr(obj, "images"):
+                    converted["images"] = convert(getattr(obj, "images"), width_cm, height_cm)
+                return converted
 
             return obj
 
         context = convert(report)
         context["report_title"] = report_title or "区级检查日报"
         context["report_date_text"] = report_date_text
+        context["outside_bucket_issues"] = convert(outside_bucket_issues or [], 7.21, 4.06)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         doc.render(context)
-        doc.save(str(output_path))
-    return output_path
+        saved_path = _save_with_available_path(lambda path: doc.save(str(path)), output_path)
+    return saved_path
 
 
 def _word_image_path(
@@ -326,8 +333,7 @@ def render_street_report_docx_from_jinja(
         run.font.size = DX_Pt(14)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    clean_doc.save(str(output_path))
-    return output_path
+    return _save_with_available_path(lambda path: clean_doc.save(str(path)), output_path)
 
 
 def _drop_unmatched_jinja_end_tags(lines: list[str]) -> list[str]:
@@ -371,6 +377,7 @@ FONT_HEITI = "\u9ed1\u4f53"
 def render_street_report_docx(
     report: StreetReport,
     output_path: Path,
+    outside_bucket_issues: list[Any] | None = None,
     image_compression: str = DEFAULT_IMAGE_COMPRESSION,
 ) -> Path:
     document = Document()
@@ -385,7 +392,8 @@ def render_street_report_docx(
                 _add_heading(document, f"（{community.index_cn}）{community.name}", level=2)
                 _add_heading(document, "1.小区整体情况", level=3)
                 _add_body(document, f"{community.overall_intro}存在的问题是：{community.overall_problem_summary}")
-                _add_body(document, "小区宣传氛围：")
+                suffix = community.promo_text if community.promo_text and community.promo_text != "无问题" else ""
+                _add_body(document, f"小区宣传氛围：{suffix}")
                 _add_images(document, community.promo_images, image_cache)
                 _add_body(document, "小区公示牌：")
                 _add_images(document, community.notice_board_images, image_cache)
@@ -419,10 +427,38 @@ def render_street_report_docx(
 
         if report.social_units:
             _render_units(document, f"{_chinese_section_number(section_number)}、社会单位", report.social_units, image_cache)
+            section_number += 1
+
+        if outside_bucket_issues:
+            _render_outside_bucket_issues(
+                document,
+                f"{_chinese_section_number(section_number)}、桶外摆检查",
+                outside_bucket_issues,
+                image_cache,
+            )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        document.save(output_path)
-    return output_path
+        saved_path = _save_with_available_path(lambda path: document.save(path), output_path)
+    return saved_path
+
+
+def _save_with_available_path(save_func, output_path: Path) -> Path:
+    try:
+        save_func(output_path)
+        return output_path
+    except PermissionError:
+        fallback = _next_available_output_path(output_path)
+        print(f"[warn] 目标文件被占用，已另存为: {fallback}")
+        save_func(fallback)
+        return fallback
+
+
+def _next_available_output_path(output_path: Path) -> Path:
+    for index in range(1, 100):
+        candidate = output_path.with_name(f"{output_path.stem}（另存{index}）{output_path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise PermissionError(f"目标文件被占用，且无法找到可用另存文件名: {output_path}")
 
 
 class ImageCache:
@@ -454,6 +490,42 @@ def _render_units(document: Document, heading: str, units: list[UnitSection], im
         _add_images(document, unit.promo_images, image_cache)
         _add_heading(document, f"2.桶站设置情况：{unit.container_problem_summary}", level=3)
         _add_images(document, unit.container_images, image_cache)
+
+
+def _render_outside_bucket_issues(
+    document: Document,
+    heading: str,
+    issues: list[Any],
+    image_cache: ImageCache,
+) -> None:
+    _add_heading(document, heading, level=1)
+    for issue in issues:
+        street_name = _get_issue_value(issue, "street_name", "street")
+        clean_text = _get_issue_value(issue, "clean_text", "text")
+        if clean_text and not clean_text.endswith(("。", "；", ";", "！", "!", "?", "？")):
+            clean_text += "。"
+        _add_body(document, f"{street_name}：{clean_text}")
+        images = _get_issue_images(issue)
+        _add_images(document, images, image_cache, width_cm=7.21, height_cm=4.06)
+
+
+def _get_issue_value(issue: Any, *names: str) -> str:
+    for name in names:
+        if isinstance(issue, dict):
+            value = issue.get(name)
+        else:
+            value = getattr(issue, name, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def _get_issue_images(issue: Any) -> list[Path]:
+    if isinstance(issue, dict):
+        images = issue.get("image_paths") or issue.get("images") or []
+    else:
+        images = getattr(issue, "image_paths", None) or getattr(issue, "images", None) or []
+    return [Path(image) for image in images if image]
 
 
 def _set_document_styles(document: Document) -> None:
@@ -490,7 +562,13 @@ def _add_body(document: Document, text: str, bold: bool = False) -> None:
     run.font.size = Pt(14)
     run.bold = bold
 
-def _add_images(document: Document, images: list[Path], image_cache: ImageCache) -> None:
+def _add_images(
+    document: Document,
+    images: list[Path],
+    image_cache: ImageCache,
+    width_cm: float = IMAGE_WIDTH_CM,
+    height_cm: float = IMAGE_HEIGHT_CM,
+) -> None:
     if not images:
         return
 
@@ -501,7 +579,7 @@ def _add_images(document: Document, images: list[Path], image_cache: ImageCache)
         paragraph.paragraph_format.space_after = Pt(0)
         run = paragraph.add_run()
         try:
-            run.add_picture(str(image_cache.word_image_path(image)), width=Cm(IMAGE_WIDTH_CM), height=Cm(IMAGE_HEIGHT_CM))
+            run.add_picture(str(image_cache.word_image_path(image)), width=Cm(width_cm), height=Cm(height_cm))
         except Exception:
             run2 = paragraph.add_run(f"[图片无法插入：{image.name}]")
             run2.font.size = Pt(9)

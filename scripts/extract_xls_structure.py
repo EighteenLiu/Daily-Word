@@ -149,9 +149,33 @@ def ensure_xlsx(args: argparse.Namespace) -> Path:
             visible=args.visible,
             verify_media=True,
         )
+        if failures and _looks_like_locked_xlsx_failure(failures[0], destination):
+            fallback = _next_available_xlsx_path(destination)
+            print(f"[warn] 转换目标 xlsx 被占用，改用: {fallback}")
+            failures = convert_with_excel(
+                jobs=[(source, fallback)],
+                overwrite=True,
+                visible=args.visible,
+                verify_media=True,
+            )
+            if not failures:
+                return fallback
     if failures:
         raise RuntimeError("Failed to convert .xls to .xlsx. See Excel COM error above.")
     return destination
+
+
+def _looks_like_locked_xlsx_failure(failure: object, destination: Path) -> bool:
+    text = str(failure)
+    return str(destination) in text and ("被占用" in text or "无法删除" in text or "Permission" in text)
+
+
+def _next_available_xlsx_path(destination: Path) -> Path:
+    for index in range(1, 100):
+        candidate = destination.with_name(f"{destination.stem}_另存{index}{destination.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"无法找到可用的 xlsx 另存路径: {destination}")
 
 
 def rel_target_to_zip_path(base_dir: str, target: str) -> str:

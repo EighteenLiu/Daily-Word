@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--garbage-summary-template", type=Path, help="Optional garbage classification daily summary template.")
     parser.add_argument("--daily-summary-template", type=Path, help="Optional simple daily summary template.")
     parser.add_argument("--summary-output-dir", type=Path, help="Output directory for generated daily summaries.")
+    parser.add_argument("--outside-bucket-file", type=Path, help="Optional outside-bucket Word report to merge into street reports.")
     parser.add_argument(
         "--image-compression",
         choices=("none", "light", "standard", "strong"),
@@ -83,6 +84,7 @@ def generate_reports(
     garbage_summary_template: Path | None = None,
     daily_summary_template: Path | None = None,
     summary_output_dir: Path | None = None,
+    outside_bucket_path: Path | None = None,
     image_compression: str = "standard",
 ) -> int:
     try:
@@ -95,6 +97,7 @@ def generate_reports(
             render_street_report_docx_from_docxtpl,
         )
         from generate_rule_based_daily_report import has_jinja_tags
+        from outside_bucket_parser import ensure_outside_bucket_docx, filter_outside_bucket_items, parse_outside_bucket_docx
     except ModuleNotFoundError:
         from scripts import extract_xls_structure as extract
         from scripts import generate_daily_summaries as summaries
@@ -105,6 +108,7 @@ def generate_reports(
             render_street_report_docx_from_docxtpl,
         )
         from scripts.generate_rule_based_daily_report import has_jinja_tags
+        from scripts.outside_bucket_parser import ensure_outside_bucket_docx, filter_outside_bucket_items, parse_outside_bucket_docx
 
     source = source.resolve() if source else newest_xls()
     if not source.exists():
@@ -179,6 +183,24 @@ def generate_reports(
     )
     rows = load_ledger_rows(xlsx_path, include_images=True, image_source_path=image_source_path)
     streets = _ordered_streets(rows)
+    outside_bucket_items = []
+    outside_bucket_temp_dir: tempfile.TemporaryDirectory | None = None
+    if outside_bucket_path:
+        outside_bucket_path = outside_bucket_path.resolve()
+        if not outside_bucket_path.exists():
+            raise FileNotFoundError(f"Outside-bucket file does not exist: {outside_bucket_path}")
+        outside_bucket_temp_dir = tempfile.TemporaryDirectory(prefix="outside_bucket_images_")
+        print(f"[run] 桶外摆文件: {outside_bucket_path}")
+        normalized_outside_bucket_path = ensure_outside_bucket_docx(
+            outside_bucket_path,
+            Path(outside_bucket_temp_dir.name) / "converted",
+        )
+        outside_bucket_items = parse_outside_bucket_docx(
+            normalized_outside_bucket_path,
+            Path(outside_bucket_temp_dir.name) / "images",
+        )
+        image_total = sum(len(item.image_paths) for item in outside_bucket_items)
+        print(f"[ok] 桶外摆解析完成: 共识别 {len(outside_bucket_items)} 条问题, 图片 {image_total} 张")
     effective_template = (
         split.convert_template_to_docx(effective_template.resolve())
         if effective_template and effective_template.exists()
@@ -187,30 +209,46 @@ def generate_reports(
     use_jinja_template = bool(effective_template and effective_template.exists() and has_jinja_tags(effective_template))
     written = 0
     street_report_paths: list[tuple[str, Path]] = []
-    for street in streets:
-        report = build_street_report(rows, street)
-        if not any((report.communities, report.restaurants, report.social_units)):
-            continue
-        filename = f"{report_date.short}{split.CN_DISTRICT}{split.short_street_name(street)}{split.CN_CHECK_REPORT}.docx"
-        output_path = street_output_dir / split.safe_filename(filename)
-        if output_path.exists() and not overwrite:
+    try:
+        for street in streets:
+            report = build_street_report(rows, street)
+            outside_bucket_matches = filter_outside_bucket_items(outside_bucket_items, [street]) if outside_bucket_items else []
+            if not any((report.communities, report.restaurants, report.social_units, outside_bucket_matches)):
+                continue
+            if outside_bucket_path:
+                matched_images = sum(len(item.image_paths) for item in outside_bucket_matches)
+                print(f"[ok] 桶外摆匹配完成: {street} {len(outside_bucket_matches)} 条, 图片 {matched_images} 张")
+                if not outside_bucket_matches:
+                    print(f"[warn] 未匹配到当前街道桶外摆问题: {street}")
+            filename = f"{report_date.short}{split.CN_DISTRICT}{split.short_street_name(street)}{split.CN_CHECK_REPORT}.docx"
+            output_path = street_output_dir / split.safe_filename(filename)
+            if output_path.exists() and not overwrite:
+                street_report_paths.append((street, output_path))
+                print(f"[skip] exists: {output_path}")
+                continue
+            if use_jinja_template:
+                output_path = render_street_report_docx_from_docxtpl(
+                    report=report,
+                    template_path=effective_template,
+                    output_path=output_path,
+                    report_title=f"{report_date.short}区级{split.short_street_name(street)}检查日报",
+                    report_date_text=report_date.chinese,
+                    outside_bucket_issues=outside_bucket_matches,
+                    image_compression=image_compression,
+                )
+            else:
+                output_path = render_street_report_docx(
+                    report,
+                    output_path,
+                    outside_bucket_issues=outside_bucket_matches,
+                    image_compression=image_compression,
+                )
+            written += 1
             street_report_paths.append((street, output_path))
-            print(f"[skip] exists: {output_path}")
-            continue
-        if use_jinja_template:
-            render_street_report_docx_from_docxtpl(
-                report=report,
-                template_path=effective_template,
-                output_path=output_path,
-                report_title=f"{report_date.short}区级{split.short_street_name(street)}检查日报",
-                report_date_text=report_date.chinese,
-                image_compression=image_compression,
-            )
-        else:
-            render_street_report_docx(report, output_path, image_compression=image_compression)
-        written += 1
-        street_report_paths.append((street, output_path))
-        print(f"[ok] {street} -> {output_path}")
+            print(f"[ok] {street} -> {output_path}")
+    finally:
+        if outside_bucket_temp_dir is not None:
+            outside_bucket_temp_dir.cleanup()
 
     print(f"[ok] date: {report_date.short}")
     print(f"[ok] output_dir: {street_output_dir}")
@@ -267,6 +305,7 @@ def main() -> int:
             garbage_summary_template=args.garbage_summary_template,
             daily_summary_template=args.daily_summary_template,
             summary_output_dir=args.summary_output_dir,
+            outside_bucket_path=args.outside_bucket_file,
             image_compression=args.image_compression,
         )
     except Exception as exc:

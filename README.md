@@ -66,17 +66,18 @@ py -3 scripts\daily_report_gui.py
 ## GUI 使用步骤
 
 1. 选择台账文件，支持 `.xls` / `.xlsx`。
-2. 选择街道日报模板 `.docx`。
-3. 如需生成日汇总，勾选“同时生成每日汇总和垃圾分类工作日报”，并选择：
+2. 可选选择“桶外摆日报”Word 文件，支持 `.docx`，也支持 `.doc` 自动转换。
+3. 选择街道日报模板 `.docx`。
+4. 如需生成日汇总，勾选“同时生成每日汇总和垃圾分类工作日报”，并选择：
    - 垃圾分类日报模板：例如 `input/5月17日垃圾分类工作日报.docx`
    - 每日汇总模板：例如 `input/每日汇总情况(10).docx`
-4. 选择图片压缩等级：
+5. 选择图片压缩等级：
    - 标准：推荐，体积和清晰度平衡。
    - 轻度：更清晰，文件更大。
    - 强力：文件更小。
    - 不压缩：插入原图，文件可能很大。
-5. 点击“生成日报”。
-6. 到 `output/` 查看生成结果；日汇总默认输出到 `output/每日总结/每日总结（日期）/`。
+6. 点击“生成日报”。
+7. 到 `output/` 查看生成结果；日汇总默认输出到 `output/每日总结/每日总结（日期）/`。
 
 ## Excel COM 转换
 
@@ -113,6 +114,12 @@ release\日报生成工具.zip
 
 ```powershell
 python scripts\generate_daily_reports.py input\台账.xls --template input\街道日报模板.docx --overwrite
+```
+
+带桶外摆日报汇入：
+
+```powershell
+python scripts\generate_daily_reports.py input\台账.xls --template input\街道日报模板.docx --outside-bucket-file input\桶外摆日报.docx --overwrite
 ```
 
 同时生成两个日汇总报告：

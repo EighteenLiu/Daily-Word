@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import time
 import zipfile
@@ -16,6 +17,7 @@ RPC_E_CALL_REJECTED = -2147418111
 RPC_S_SERVER_UNAVAILABLE = -2147023174
 EXCEL_COM_RETRY_ATTEMPTS = 8
 EXCEL_COM_RETRY_DELAY_SECONDS = 1.5
+EXCEL_CONVERT_TEMP_DIR = Path(r"D:\temp_excel_convert")
 
 
 def parse_args() -> argparse.Namespace:
@@ -155,6 +157,16 @@ def embedded_media_summary(xlsx_path: Path) -> tuple[int, int]:
     return len(media_files), sum(info.file_size for info in media_files)
 
 
+def safe_remove(path: Path) -> None:
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except PermissionError as exc:
+        raise RuntimeError(f"目标文件被占用，无法删除：{path}") from exc
+
+
 def is_excel_call_rejected(exc: Exception) -> bool:
     return bool(getattr(exc, "args", ())) and getattr(exc, "args", ())[0] == RPC_E_CALL_REJECTED
 
@@ -167,19 +179,23 @@ def is_excel_disconnect(exc: Exception) -> bool:
 
 
 def close_workbook_quietly(workbook) -> None:
+    if workbook is None:
+        return
     try:
         workbook.Close(SaveChanges=False)
-    except Exception as exc:
-        if not is_excel_disconnect(exc):
-            raise
+    except Exception:
+        # SaveAs 失败后 Excel COM 对象可能断开；关闭失败不应覆盖真正的保存错误。
+        pass
 
 
 def quit_excel_quietly(excel) -> None:
+    if excel is None:
+        return
     try:
         excel.Quit()
-    except Exception as exc:
-        if not is_excel_disconnect(exc):
-            raise
+    except Exception:
+        # Excel.Application 已断开时，Quit 本身也可能不可用。
+        pass
 
 
 def call_excel_with_retry(action: str, func):
@@ -207,6 +223,32 @@ def call_excel_with_retry(action: str, func):
         "Excel 一直拒绝接收自动化调用。请关闭所有 Excel 窗口、弹窗和保护视图后重试；"
         "也可以手动打开该 .xls，另存为 .xlsx 后再选择 .xlsx 台账。"
     ) from last_exc
+
+
+def lock_file_for_xlsx(xlsx_path: Path) -> Path:
+    return xlsx_path.parent / f"~${xlsx_path.name}"
+
+
+def temporary_xlsx_path_for(xlsx_path: Path) -> Path:
+    EXCEL_CONVERT_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    return EXCEL_CONVERT_TEMP_DIR / f"{xlsx_path.stem}_{int(time.time())}.xlsx"
+
+
+def prepare_xlsx_destination(xlsx_path: Path) -> Path:
+    xlsx_path = Path(xlsx_path)
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_remove(xlsx_path)
+    safe_remove(lock_file_for_xlsx(xlsx_path))
+    tmp_xlsx_path = temporary_xlsx_path_for(xlsx_path)
+    safe_remove(tmp_xlsx_path)
+    safe_remove(lock_file_for_xlsx(tmp_xlsx_path))
+    return tmp_xlsx_path
+
+
+def replace_xlsx_destination(tmp_xlsx_path: Path, xlsx_path: Path) -> None:
+    safe_remove(xlsx_path)
+    safe_remove(lock_file_for_xlsx(xlsx_path))
+    shutil.move(str(tmp_xlsx_path), str(xlsx_path))
 
 
 def convert_with_excel(
@@ -253,8 +295,9 @@ def convert_with_excel(
                 continue
 
             workbook = None
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            tmp_destination: Path | None = None
             try:
+                tmp_destination = prepare_xlsx_destination(destination)
                 workbook = call_excel_with_retry(
                     f"打开 {source.name}",
                     lambda: excel.Workbooks.Open(
@@ -263,19 +306,25 @@ def convert_with_excel(
                         ReadOnly=True,
                         AddToMru=False,
                         IgnoreReadOnlyRecommended=True,
+                        CorruptLoad=1,
                     ),
                 )
                 workbook.CheckCompatibility = False
                 set_workbook_no_picture_compression(workbook)
                 call_excel_with_retry(
-                    f"保存 {destination.name}",
+                    f"保存 {tmp_destination.name}",
                     lambda: workbook.SaveAs(
-                        Filename=str(destination),
+                        Filename=str(tmp_destination),
                         FileFormat=XLSX_FILE_FORMAT,
                         CreateBackup=False,
+                        ConflictResolution=2,
                         Local=True,
                     ),
                 )
+                close_workbook_quietly(workbook)
+                workbook = None
+                replace_xlsx_destination(tmp_destination, destination)
+                tmp_destination = None
                 if verify_media:
                     count, total_size = embedded_media_summary(destination)
                     print(f"[ok] {source} -> {destination} | media: {count} files, {total_size} bytes")
@@ -287,6 +336,11 @@ def convert_with_excel(
             finally:
                 if workbook is not None:
                     close_workbook_quietly(workbook)
+                if tmp_destination is not None:
+                    try:
+                        safe_remove(tmp_destination)
+                    except Exception:
+                        pass
     finally:
         if excel is not None:
             quit_excel_quietly(excel)

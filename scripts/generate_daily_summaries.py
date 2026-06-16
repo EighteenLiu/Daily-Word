@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 from collections import OrderedDict
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -22,13 +23,20 @@ FONT_SONG = "\u5b8b\u4f53"
 
 
 def chinese_numeral(number: int) -> str:
-    import split_street_daily_reports as split
+    try:
+        import split_street_daily_reports as split
+    except ModuleNotFoundError:
+        from scripts import split_street_daily_reports as split
 
     return split.chinese_numeral(number)
 
 
 def short_street_name(street: str) -> str:
     return street[:-2] if street.endswith(CN_STREET) else street
+
+
+def full_street_name(short_name: str) -> str:
+    return short_name if short_name.endswith(CN_STREET) else f"{short_name}{CN_STREET}"
 
 
 def clean_problem_number(text: str) -> str:
@@ -104,6 +112,50 @@ def street_report_problem_map(street_report_paths: Iterable[tuple[str, Path]]) -
         if place_problems:
             result[street] = place_problems
     return result
+
+
+def collect_street_report_paths(report_dir: Path) -> list[tuple[str, Path]]:
+    report_paths: list[tuple[str, Path]] = []
+    for path in sorted(report_dir.glob("*.docx"), key=lambda item: item.name):
+        if path.name.startswith("~$"):
+            continue
+        street = _street_name_from_report_filename(path)
+        if street:
+            report_paths.append((street, path))
+    if not report_paths:
+        raise RuntimeError(f"未在文件夹中找到街道日报 docx：{report_dir}")
+    return report_paths
+
+
+def infer_report_date_from_street_reports(report_paths: Iterable[tuple[str, Path]]):
+    try:
+        import split_street_daily_reports as split
+    except ModuleNotFoundError:
+        from scripts import split_street_daily_reports as split
+
+    dates = []
+    for _, path in report_paths:
+        match = re.search(r"(\d{1,2}\.\d{1,2})", path.name)
+        if match:
+            dates.append(split.parse_report_date(match.group(1)))
+            continue
+        inferred = split.infer_date_from_filename(path)
+        if inferred:
+            dates.append(inferred)
+    if not dates:
+        raise RuntimeError("无法从已有日报文件名识别日期，请确认文件名包含类似 6.16 或 20260616 的日期。")
+    return max(dates, key=lambda item: item.value)
+
+
+def _street_name_from_report_filename(path: Path) -> str:
+    text = path.stem
+    match = re.search(r"区级(.+?)检查日报", text)
+    if match:
+        return full_street_name(match.group(1).strip())
+    match = re.search(r"(.+?)街道", text)
+    if match:
+        return f"{match.group(1).strip()}街道"
+    return ""
 
 
 def extract_garbage_problem_texts_from_street_report(path: Path) -> "OrderedDict[str, str]":
@@ -309,9 +361,22 @@ def write_garbage_summary(
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{chinese_day_prefix(report_date)}{CN_GARBAGE_DAILY}.docx"
         return render_garbage_daily_report(template_path.resolve(), context, output_path)
+    if street_report_paths is not None and _template_has_jinja_tags(template_path):
+        try:
+            from garbage_daily_report import render_garbage_daily_report
+        except ModuleNotFoundError:
+            from scripts.garbage_daily_report import render_garbage_daily_report
+
+        context = _summary_context_from_street_reports(street_report_paths, report_date)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{chinese_day_prefix(report_date)}{CN_GARBAGE_DAILY}.docx"
+        return render_garbage_daily_report(template_path.resolve(), context, output_path)
 
     from docx import Document
-    import split_street_daily_reports as split
+    try:
+        import split_street_daily_reports as split
+    except ModuleNotFoundError:
+        from scripts import split_street_daily_reports as split
 
     template_path = split.convert_template_to_docx(template_path.resolve())
     document = Document(template_path)
@@ -375,7 +440,14 @@ def write_garbage_summary(
     return output_path
 
 
-def write_daily_summary(template_path: Path, reports: dict, report_date, output_dir: Path, ledger_rows: list | None = None) -> Path:
+def write_daily_summary(
+    template_path: Path,
+    reports: dict,
+    report_date,
+    output_dir: Path,
+    ledger_rows: list | None = None,
+    street_report_paths: list[tuple[str, Path]] | None = None,
+) -> Path:
     if ledger_rows is not None:
         try:
             from docxtpl import DocxTemplate
@@ -394,9 +466,34 @@ def write_daily_summary(template_path: Path, reports: dict, report_date, output_
         doc.render(context)
         doc.save(str(output_path))
         return output_path
+    if street_report_paths is not None:
+        try:
+            from docxtpl import DocxTemplate
+        except ModuleNotFoundError:
+            raise
+
+        street_problem_map = street_report_problem_map(street_report_paths)
+        context = {
+            "report_date": report_date.value,
+            "report_date_text": report_date.chinese,
+            "street_count": len(street_report_paths),
+            "street_problem_counts": [
+                {"short_name": short_street_name(street), "problem_count": len(street_problem_map.get(street, {}))}
+                for street, _ in street_report_paths
+            ],
+        }
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{CN_DAILY_SUMMARY}({report_date.value.day}).docx"
+        doc = DocxTemplate(str(template_path.resolve()))
+        doc.render(context)
+        doc.save(str(output_path))
+        return output_path
 
     from docx import Document
-    import split_street_daily_reports as split
+    try:
+        import split_street_daily_reports as split
+    except ModuleNotFoundError:
+        from scripts import split_street_daily_reports as split
 
     template_path = split.convert_template_to_docx(template_path.resolve())
     document = Document(template_path)
@@ -452,8 +549,113 @@ def write_summaries(
             )
         )
     if daily_template:
-        written.append(write_daily_summary(daily_template, reports, report_date, output_dir, ledger_rows=ledger_rows))
+        written.append(
+            write_daily_summary(
+                daily_template,
+                reports,
+                report_date,
+                output_dir,
+                ledger_rows=ledger_rows,
+                street_report_paths=street_report_paths,
+            )
+        )
     return written
+
+
+def generate_summaries_from_existing_reports(
+    report_dir: Path,
+    garbage_template: Path | None = None,
+    daily_template: Path | None = None,
+    output_dir: Path | None = None,
+) -> list[Path]:
+    street_report_paths = collect_street_report_paths(report_dir.resolve())
+    report_date = infer_report_date_from_street_reports(street_report_paths)
+    reports: dict = {}
+    print(f"[run] 基于已有日报生成汇总: {report_dir}")
+    print(f"[ok] date: {report_date.short}")
+    print(f"[ok] existing reports: {len(street_report_paths)}")
+    written = write_summaries(
+        reports=reports,
+        report_date=report_date,
+        garbage_template=garbage_template,
+        daily_template=daily_template,
+        output_dir=output_dir,
+        street_report_paths=street_report_paths,
+        ledger_rows=None,
+    )
+    for path in written:
+        print(f"[ok] summary: {path}")
+    return written
+
+
+def _template_has_jinja_tags(template_path: Path) -> bool:
+    try:
+        from docx import Document
+    except ModuleNotFoundError:
+        return False
+    try:
+        document = Document(str(template_path))
+    except Exception:
+        return False
+    texts = [paragraph.text for paragraph in document.paragraphs]
+    for table in document.tables:
+        for row in table.rows:
+            texts.extend(cell.text for cell in row.cells)
+    text = "\n".join(texts)
+    return "{{" in text or "{%" in text
+
+
+def _summary_context_from_street_reports(street_report_paths: list[tuple[str, Path]], report_date) -> dict:
+    street_problem_map = street_report_problem_map(street_report_paths)
+    residential_streets = []
+    for index, (street, _) in enumerate(street_report_paths, start=1):
+        places = street_problem_map.get(street, OrderedDict())
+        residential_streets.append(
+            {
+                "index_cn": chinese_numeral(index),
+                "name": street,
+                "points": [
+                    {
+                        "name": place_name,
+                        "issues": [{"text": item} for item in split_problem_segments(problem_text) if is_real_problem(item)],
+                    }
+                    for place_name, problem_text in places.items()
+                ],
+                "outside_bucket_issues": [],
+            }
+        )
+
+    previous_day = report_date.value - timedelta(days=1)
+    return {
+        "report_date": report_date.value,
+        "report_date_text": report_date.chinese,
+        "street_count": len(street_report_paths),
+        "city_check": {
+            "summary": "今日市级检查情况未更新。",
+            "note": "",
+            "has_attachment": False,
+            "attachment_no": None,
+            "table_title": "市级重点抽查情况",
+        },
+        "city_check_rows": [],
+        "residential_streets": residential_streets,
+        "social_streets": [],
+        "catering_streets": [],
+        "special_check": {"summary": "", "rows": []},
+        "enforcement": {
+            "attachment_no": 1,
+            "date_text": f"{previous_day.year}年{previous_day.month}月{previous_day.day}日",
+            "attachment_title": f"{previous_day.month}.{previous_day.day}西城区《北京市生活垃圾管理条例》专线执法统计表",
+            "rows": [],
+            "total_checks": 0,
+            "case_count": 0,
+            "fine_amount": 0,
+        },
+        "waste_data": {
+            "date_text": f"{previous_day.year}年{previous_day.month}月{previous_day.day}日",
+            "summary": "生活垃圾清运量数据暂未更新。",
+        },
+    }
 
 
 def _street_problem_counts_from_context(context: dict) -> list[dict[str, int | str]]:
