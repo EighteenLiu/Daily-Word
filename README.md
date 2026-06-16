@@ -69,8 +69,8 @@ py -3 scripts\daily_report_gui.py
 2. 可选选择“桶外摆日报”Word 文件，支持 `.docx`，也支持 `.doc` 自动转换。
 3. 选择街道日报模板 `.docx`。
 4. 如需生成日汇总，勾选“同时生成每日汇总和垃圾分类工作日报”，并选择：
-   - 垃圾分类日报模板：例如 `input/5月17日垃圾分类工作日报.docx`
-   - 每日汇总模板：例如 `input/每日汇总情况(10).docx`
+   - 垃圾分类日报模板：例如 `input/垃圾分类工作日报_jinja模板.docx`
+   - 每日汇总模板：例如 `input/每日汇总情况_jinja模板.docx`
 5. 选择图片压缩等级：
    - 标准：推荐，体积和清晰度平衡。
    - 轻度：更清晰，文件更大。
@@ -113,19 +113,19 @@ release\日报生成工具.zip
 批量生成：
 
 ```powershell
-python scripts\generate_daily_reports.py input\台账.xls --template input\街道日报模板.docx --overwrite
+python scripts\generate_daily_reports.py input\台账.xls --template input\daily_report_jinja_template.docx --overwrite
 ```
 
 带桶外摆日报汇入：
 
 ```powershell
-python scripts\generate_daily_reports.py input\台账.xls --template input\街道日报模板.docx --outside-bucket-file input\桶外摆日报.docx --overwrite
+python scripts\generate_daily_reports.py input\台账.xls --template input\daily_report_jinja_template.docx --outside-bucket-file input\桶外摆日报.docx --overwrite
 ```
 
 同时生成两个日汇总报告：
 
 ```powershell
-python scripts\generate_daily_reports.py input\台账.xls --template input\街道日报模板.docx --garbage-summary-template input\5月17日垃圾分类工作日报.docx --daily-summary-template input\每日汇总情况(10).docx --overwrite
+python scripts\generate_daily_reports.py input\台账.xls --template input\daily_report_jinja_template.docx --garbage-summary-template input\垃圾分类工作日报_jinja模板.docx --daily-summary-template input\每日汇总情况_jinja模板.docx --overwrite
 ```
 
 指定图片压缩：

@@ -26,9 +26,9 @@ def first_existing_input_file(*names: str) -> Path:
     return INPUT_ROOT / names[0]
 
 
-DEFAULT_TEMPLATE = first_existing_input_file("街道日报模板.docx", "日报模版.docx", "daily_report_jinja_template.docx")
-DEFAULT_GARBAGE_SUMMARY_TEMPLATE = first_existing_input_file("5月17日垃圾分类工作日报.docx")
-DEFAULT_DAILY_SUMMARY_TEMPLATE = first_existing_input_file("每日汇总情况(10).docx")
+DEFAULT_TEMPLATE = first_existing_input_file("daily_report_jinja_template.docx", "街道日报模板.docx", "日报模版.docx")
+DEFAULT_GARBAGE_SUMMARY_TEMPLATE = first_existing_input_file("垃圾分类工作日报_jinja模板.docx", "5月17日垃圾分类工作日报.docx")
+DEFAULT_DAILY_SUMMARY_TEMPLATE = first_existing_input_file("每日汇总情况_jinja模板.docx", "每日汇总情况(10).docx")
 
 
 class DailyReportApp(tk.Tk):
