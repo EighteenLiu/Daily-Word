@@ -87,16 +87,25 @@ py -3 scripts\daily_report_gui.py
 
 ## 打包 exe
 
-在项目根目录运行：
+在项目根目录运行下面这组命令。前两行会把临时目录指到项目内的 `tmp`，避免打包临时文件写到 C 盘：
 
 ```powershell
+$env:TEMP="$PWD\tmp"
+$env:TMP="$PWD\tmp"
+New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
 python packaging\build_release.py
 ```
 
-或：
+也可以直接运行封装好的 PowerShell 脚本：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\build_release.ps1
+```
+
+如果提示缺少 PyInstaller，先安装依赖：
+
+```powershell
+python -m pip install pyinstaller
 ```
 
 输出位置：
@@ -154,6 +163,7 @@ python scripts\generate_daily_reports.py input\台账.xls --image-compression st
 注意：
 
 - 控制整段显示时用 `{%p if ... %}` / `{%p for ... %}`。
+- 小区整体情况段如果只写 `存在的问题是：{{ community.overall_problem_summary }}`，渲染器会自动在前面补入 `{{ community.overall_intro }}`，避免旧模板漏掉“好的方面”。
 - 控制同一段中的文字时用普通 `{% if ... %}`。
 - 图片段落在模板中设置居中，生成后图片才会居中。
 - 动态循环出来的段落样式取决于模板中该段自身样式。

@@ -7,9 +7,13 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Iterable, Any
 import xml.etree.ElementTree as ET
+
+try:
+    from workspace_temp import temporary_directory
+except ModuleNotFoundError:
+    from scripts.workspace_temp import temporary_directory
 
 
 COMMUNITY_CATEGORY = "居住小区、平房胡同"
@@ -17,6 +21,37 @@ RESTAURANT_CATEGORY = "餐饮单位"
 SOCIAL_UNIT_CATEGORY = "社会单位"
 SPECIAL_CHECK_CATEGORY = "专项检查"
 SPECIAL_CHECK_NO_PROBLEM_TYPES = {"良好，未发现问题", "良好,未发现问题", "无问题", "未发现问题"}
+OUTSIDE_BUCKET_POINT = "厨余、其他垃圾桶外摆检查"
+COMMUNITY_SPECIAL_NO_PROBLEM_RESULTS_BY_INDICATOR = {
+    "智能回收箱是否正常运行": {"正常运行"},
+    "小区宣传引导": {"有宣传氛围"},
+    "居民知晓垃圾分类情况": {"合格"},
+    "小区公示牌": {"良好，未发现问题", "良好,未发现问题"},
+    "小区内环境": {"良好，未发现问题", "良好,未发现问题"},
+    "投放点宣传指引": {"有宣传氛围"},
+    "投放点公示牌设置": {"有"},
+    "投放点公示牌": {"良好，未发现问题", "良好,未发现问题"},
+    "容器成组设置": {"良好，未发现问题", "良好,未发现问题"},
+    "容器品类成组设置": {"成组配置"},
+    "容器品类设置": {"成组配置"},
+    "容器标识": {"良好，未发现问题", "良好,未发现问题"},
+    "遮雨棚": {"有"},
+    "投放点环境": {"良好，未发现问题", "良好,未发现问题"},
+    "投放点环境（容器检查）": {"良好，未发现问题", "良好,未发现问题"},
+    "容器检查": {"良好，未发现问题", "良好,未发现问题"},
+    "桶站便利性措施": {"有，能正常使用", "有,能正常使用"},
+    "早、晚高峰投放时段开盖": {"符合要求"},
+    "灭蚊蝇、地面防滑设备": {"均有设置"},
+    "保洁人员作业规范": {"良好，未发现问题", "良好,未发现问题"},
+    "收集车辆": {"良好，未发现问题", "良好,未发现问题"},
+    "可回收物体系": {"良好，未发现问题", "良好,未发现问题"},
+    "大件垃圾投放点": {"有"},
+    "大件垃圾投放点设置": {"良好，未发现问题", "良好,未发现问题"},
+    "装修垃圾投放点": {"有"},
+    "装修垃圾投放点设置": {"良好，未发现问题", "良好,未发现问题"},
+    "居民自主投放情况": {"投放正确"},
+}
+COMMUNITY_SPECIAL_NEUTRAL_INDICATORS = {"检查时段"}
 
 CANONICAL_STREET_ORDER = [
     "德胜街道",
@@ -124,6 +159,15 @@ def is_non_issue(text: object) -> bool:
 
 
 def normalize_issue(row: Any, unit_kind: str = "residential") -> list[NormalizedIssue]:
+    if unit_kind == "residential":
+        indicator2_raw = _clean_issue_source(getattr(row, "indicator2", ""))
+        indicator3_raw = normalize_punctuation(getattr(row, "indicator3", "")).strip("。.;,、:（）() ")
+        residential_existence_problems = {
+            "大件垃圾投放点": "无大件垃圾投放点",
+            "装修垃圾投放点": "无装修垃圾投放点",
+        }
+        if indicator2_raw in residential_existence_problems and indicator3_raw == "无":
+            return [NormalizedIssue(label=residential_existence_problems[indicator2_raw], count=1)]
     raw_problem = _clean_issue_source(getattr(row, "problem", ""))
     if is_non_issue(raw_problem):
         raw_problem = ""
@@ -148,23 +192,56 @@ def normalize_issue(row: Any, unit_kind: str = "residential") -> list[Normalized
 def extract_count(text: object) -> int:
     normalized = normalize_punctuation(text)
     explicit = [int(match) for match in re.findall(r"(\d+)处", normalized)]
-    explicit.extend(COUNT_CN[value] for value in re.findall(r"([一二两三四五六七八九十])处", normalized))
+    explicit.extend(
+        parsed
+        for parsed in (_parse_chinese_count(value) for value in re.findall(r"([零〇一二两三四五六七八九十百]+)处", normalized))
+        if parsed is not None
+    )
     return max(explicit) if explicit else 1
+
+
+def _parse_chinese_count(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    if value in COUNT_CN:
+        return COUNT_CN[value]
+    if "百" in value:
+        left, right = value.split("百", 1)
+        hundred = COUNT_CN.get(left, 1 if not left else 0) * 100
+        return hundred + (_parse_chinese_count(right) or 0)
+    if value.startswith("十"):
+        return 10 + (_parse_chinese_count(value[1:]) or 0)
+    if "十" in value:
+        left, right = value.split("十", 1)
+        return COUNT_CN.get(left, 0) * 10 + (_parse_chinese_count(right) or 0)
+    return None
 
 
 def format_issue_list(issues: Iterable[dict[str, Any] | NormalizedIssue]) -> str:
     texts = []
     for issue in issues:
         if isinstance(issue, NormalizedIssue):
-            texts.append(issue.text)
+            text = issue.text
         else:
-            texts.append(str(issue.get("text") or f"{issue['label']}{issue.get('count', 1)}处"))
+            text = str(issue.get("text") or f"{issue['label']}{issue.get('count', 1)}处")
+        texts.append(_normalize_final_issue_text(text))
     if not texts:
         return "无问题。"
     return "；".join(f"（{index}）{text}" for index, text in enumerate(texts, start=1)) + "。"
 
 
+def _normalize_final_issue_text(text: object) -> str:
+    value = "" if text is None else str(text).strip()
+    while True:
+        cleaned = re.sub(r"^[（(]\d+[）)]\s*", "", value)
+        if cleaned == value:
+            break
+        value = cleaned.strip()
+    return value.rstrip("。；;，,、 ")
+
+
 def build_garbage_daily_context(rows: list[Any], report_date: Any) -> dict[str, Any]:
+    outside_bucket_by_street = group_outside_bucket_by_street(extract_outside_bucket_issues_for_daily(rows))
     context: dict[str, Any] = {
         "report_date": getattr(report_date, "value", report_date),
         "report_date_text": report_date.chinese,
@@ -177,7 +254,12 @@ def build_garbage_daily_context(rows: list[Any], report_date: Any) -> dict[str, 
             "table_title": "市级重点抽查情况",
         },
         "city_check_rows": [],
-        "residential_streets": _build_category_streets(rows, COMMUNITY_CATEGORY, "residential"),
+        "residential_streets": _build_category_streets(
+            rows,
+            COMMUNITY_CATEGORY,
+            "residential",
+            outside_bucket_by_street=outside_bucket_by_street,
+        ),
         "social_streets": _build_category_streets(rows, SOCIAL_UNIT_CATEGORY, "social"),
         "catering_streets": _build_category_streets(rows, RESTAURANT_CATEGORY, "catering"),
         "special_check": build_special_check_context(rows, report_date),
@@ -198,40 +280,49 @@ def build_garbage_daily_context(rows: list[Any], report_date: Any) -> dict[str, 
 
 def build_special_check_context(rows: list[Any], report_date: Any) -> dict[str, Any]:
     report_value = _report_date_value(report_date)
-    previous_value = report_value - timedelta(days=1)
+    start_value, end_value = _special_check_date_range(rows, report_value)
+    summary_rows = extract_special_check_rows(rows, report_date)
+    topic = _special_check_topic(rows)
     return {
         "summary": (
-            f"{_format_cn_date(previous_value)}-{_format_cn_date(report_value)}，"
-            "区垃圾分类指挥部针对各街道的桶站满冒脏污问题开展专项检查，各街道的问题如下表所示："
+            f"{_format_cn_date_range(start_value, end_value)}，"
+            f"区垃圾分类指挥部针对各街道的{topic}开展专项检查，"
+            "各街道的问题如下表所示，"
+            "具体问题照片及台账已在“垃圾分类检查工作群”发布。"
         ),
-        "rows": extract_special_check_rows(rows, report_date),
+        "rows": summary_rows,
+        "total_community_count": sum(row["community_count"] for row in summary_rows),
+        "total_problem_count": sum(row["problem_count"] for row in summary_rows),
     }
 
 
-def extract_special_check_rows(rows: Iterable[Any], report_date: Any | None = None) -> list[dict[str, str]]:
-    special_rows: list[dict[str, str]] = []
+def extract_special_check_rows(rows: Iterable[Any], report_date: Any | None = None) -> list[dict[str, Any]]:
+    street_places: dict[str, set[str]] = {street: set() for street in CANONICAL_STREET_ORDER}
+    street_problem_counts: dict[str, int] = {street: 0 for street in CANONICAL_STREET_ORDER}
     for row in rows:
         if _clean_special_text(getattr(row, "category", "")) != SPECIAL_CHECK_CATEGORY:
             continue
 
-        problem_type = _clean_special_text(getattr(row, "indicator3", ""))
-        issue_text = _clean_special_text(getattr(row, "problem", ""))
-        if problem_type in SPECIAL_CHECK_NO_PROBLEM_TYPES or "无问题" in issue_text:
+        street_name = _clean_special_text(getattr(row, "street", ""))
+        if street_name not in street_places:
+            continue
+        point_name = _clean_special_text(getattr(row, "place", ""))
+        if point_name:
+            street_places[street_name].add(point_name)
+
+        if not _is_special_check_problem_row(row):
             continue
 
-        raw_time = _clean_time_source(getattr(row, "created_time", "")) or _clean_time_source(getattr(row, "report_time", ""))
-        normalized_time = normalize_datetime_text(raw_time)
-        special_rows.append(
-            {
-                "time": normalized_time,
-                "street_name": _clean_special_text(getattr(row, "street", "")),
-                "point_name": _clean_special_text(getattr(row, "place", "")),
-                "problem_type": problem_type or infer_problem_type(issue_text),
-            }
-        )
+        street_problem_counts[street_name] += _special_check_problem_weight(row)
 
-    special_rows.sort(key=lambda item: (_datetime_sort_key(item["time"]), item["time"], item["street_name"], item["point_name"]))
-    return special_rows
+    return [
+        {
+            "street_name": street,
+            "community_count": len(street_places[street]),
+            "problem_count": street_problem_counts[street],
+        }
+        for street in CANONICAL_STREET_ORDER
+    ]
 
 
 def normalize_datetime_text(value: object) -> str:
@@ -249,6 +340,84 @@ def normalize_datetime_text(value: object) -> str:
     return text
 
 
+def _is_special_check_problem_row(row: Any) -> bool:
+    indicator2 = _clean_special_text(getattr(row, "indicator2", ""))
+    indicator3 = _clean_special_text(getattr(row, "indicator3", ""))
+    issue_text = _clean_special_text(getattr(row, "problem", ""))
+    if _special_issue_text_has_problem(issue_text):
+        return True
+    if indicator2 in COMMUNITY_SPECIAL_NEUTRAL_INDICATORS:
+        return False
+    if _is_special_no_problem_result(indicator2, indicator3):
+        return False
+    if indicator3 in SPECIAL_CHECK_NO_PROBLEM_TYPES:
+        return False
+    if _is_explicit_no_problem_issue_text(issue_text):
+        return False
+    return bool(indicator3 or issue_text)
+
+
+def _special_check_problem_weight(row: Any) -> int:
+    return 1
+
+
+def _is_special_no_problem_result(indicator2: str, indicator3: str) -> bool:
+    if not indicator3:
+        return False
+    normalized_indicator2 = _clean_special_text(indicator2)
+    normalized_indicator3 = _clean_special_text(indicator3)
+    no_problem_results = {
+        _clean_special_text(value)
+        for value in COMMUNITY_SPECIAL_NO_PROBLEM_RESULTS_BY_INDICATOR.get(normalized_indicator2, set())
+    }
+    return normalized_indicator3 in no_problem_results
+
+
+def _is_explicit_no_problem_issue_text(text: str) -> bool:
+    normalized = _clean_special_text(text)
+    return normalized in {
+        "无",
+        "无问题",
+        "良好，未发现问题",
+        "良好,未发现问题",
+        "未发现问题",
+    } or normalized.endswith("无问题") or "未发现问题" in normalized
+
+
+def _special_issue_text_has_problem(text: str) -> bool:
+    normalized = _clean_special_text(text)
+    if not normalized or _is_explicit_no_problem_issue_text(normalized):
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "不",
+            "无",
+            "未",
+            "遮挡",
+            "脏污",
+            "破损",
+            "错误",
+            "不符",
+            "不齐全",
+            "不能",
+            "无法",
+            "反转",
+            "打不开",
+            "缺",
+            "混投",
+            "敞口",
+            "遗撒",
+            "滴漏",
+            "非京牌",
+            "外摆",
+            "满冒",
+        )
+    )
+
+
+
+
 def infer_problem_type(issue_text: object) -> str:
     text = _clean_special_text(issue_text)
     if not text:
@@ -259,10 +428,36 @@ def infer_problem_type(issue_text: object) -> str:
     return text
 
 
+def _format_special_problem_type(row: Any, problem_type: str, issue_text: str) -> str:
+    problem_type = _clean_special_text(problem_type)
+    station_name = _special_station_name_from_problem(issue_text)
+    if station_name:
+        return f"{station_name}{problem_type}"
+    indicator1 = _clean_special_text(getattr(row, "indicator1", ""))
+    if indicator1 in {"交投点", "清洁站", "密闭式清洁站"}:
+        point_name = _clean_special_text(getattr(row, "place", ""))
+        if point_name:
+            return f"{point_name}{problem_type}"
+    return problem_type
+
+
+def _special_station_name_from_problem(issue_text: object) -> str:
+    text = _clean_special_text(issue_text)
+    if not text:
+        return ""
+    match = re.search(r"([0-9A-Za-z一二三四五六七八九十]+号)(?:垃圾)?桶站", text)
+    if match:
+        return f"{match.group(1)}桶站"
+    match = re.search(r"([0-9A-Za-z一二三四五六七八九十]+)(?:号)?(?:垃圾)?桶站", text)
+    if match:
+        return f"{match.group(1)}号桶站"
+    return ""
+
+
 def render_garbage_daily_report(template_path: Path, context: dict[str, Any], output_path: Path) -> Path:
     from docxtpl import DocxTemplate
 
-    with TemporaryDirectory(prefix="garbage_daily_docxtpl_") as temp_dir:
+    with temporary_directory(prefix="garbage_daily_docxtpl_") as temp_dir:
         sanitized = _sanitize_missing_media_relationships(template_path, Path(temp_dir) / "sanitized.docx")
         _validate_garbage_daily_template(sanitized, template_path)
         prepared = _prepare_template(sanitized, Path(temp_dir) / "template.docx", context)
@@ -388,7 +583,150 @@ def _relationship_target_member(rels_member: str, target: str) -> str:
     return posixpath.normpath(posixpath.join(base_dir, target))
 
 
-def _build_category_streets(rows: list[Any], category: str, unit_kind: str) -> list[dict[str, Any]]:
+def extract_outside_bucket_issues_for_daily(rows: Iterable[Any]) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    for row in rows:
+        if not _is_outside_bucket_special_row(row):
+            continue
+        street_name = str(getattr(row, "street", "") or "").strip()
+        source_text = str(getattr(row, "problem", "") or "").strip()
+        if not street_name or not source_text or is_no_problem_outside_bucket_text(source_text):
+            continue
+        clean_text = _normalize_outside_bucket_sentence(source_text)
+        daily_text = normalize_outside_bucket_daily_text(street_name, clean_text)
+        if not daily_text:
+            continue
+        issues.append(
+            {
+                "street_name": street_name,
+                "street": street_name,
+                "text": clean_text,
+                "clean_text": clean_text,
+                "daily_text": daily_text,
+            }
+        )
+    return issues
+
+
+def _is_outside_bucket_special_row(row: Any) -> bool:
+    category = str(getattr(row, "category", "") or "").strip()
+    indicator1 = str(getattr(row, "indicator1", "") or "").strip()
+    return category == OUTSIDE_BUCKET_POINT or indicator1 == OUTSIDE_BUCKET_POINT
+
+
+def is_no_problem_outside_bucket_text(text: object) -> bool:
+    normalized = normalize_punctuation(text)
+    return normalized in {"", "无", "无问题", "未发现问题", "良好,未发现问题", "良好，未发现问题"}
+
+
+def _normalize_outside_bucket_sentence(text: object) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    if value and not value.endswith(("。", "！", "？", "；", ";")):
+        value += "。"
+    return value
+
+
+def normalize_outside_bucket_daily_text(street_name: str, text: str) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"[。；;，,、\s]+$", "", value)
+    street_name = str(street_name or "").strip()
+    if street_name and value.startswith(street_name):
+        value = value[len(street_name) :].lstrip("，,：:、 ")
+    value = value.replace("，", "").replace(",", "").replace("、", "")
+    value = re.sub(r"\s+", "", value)
+    value = re.sub(r"(一个|1个|一处|1处)$", "", value)
+    if not value:
+        return ""
+    if not value.endswith("1处"):
+        value += "1处"
+    return value
+
+
+def group_outside_bucket_by_street(outside_bucket_issues: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    seen: set[tuple[str, str]] = set()
+    for issue in outside_bucket_issues or []:
+        street_name = str(issue.get("street_name") or issue.get("street") or "").strip()
+        if not street_name:
+            continue
+        source_text = str(issue.get("clean_text") or issue.get("text") or "").strip()
+        if not source_text:
+            continue
+        daily_text = _clean_outside_bucket_daily_text(
+            str(issue.get("daily_text") or "").strip()
+        ) or normalize_outside_bucket_daily_text(street_name, source_text)
+        if not daily_text:
+            continue
+        key = (street_name, daily_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(issue)
+        item["street_name"] = street_name
+        item["street"] = street_name
+        item["daily_text"] = daily_text
+        item["text"] = daily_text
+        item["clean_text"] = daily_text
+        grouped[street_name].append(item)
+    return dict(grouped)
+
+
+def make_outside_bucket_summary(street_name: str, issues: Iterable[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for index, issue in enumerate(issues or [], start=1):
+        daily_text = _clean_outside_bucket_daily_text(str(issue.get("daily_text") or "").strip())
+        if not daily_text:
+            daily_text = normalize_outside_bucket_daily_text(street_name, str(issue.get("clean_text") or issue.get("text") or ""))
+        if daily_text:
+            parts.append(f"（{index}）{daily_text}")
+    if not parts:
+        return ""
+    return f"{street_name}存在桶外摆问题的是：" + "；".join(parts) + "。"
+
+
+def _clean_outside_bucket_daily_text(text: str) -> str:
+    return re.sub(r"[。；;，,、\s]+$", "", str(text or "").strip())
+
+
+def parse_outside_bucket_from_street_report_text(report_text: str) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    in_section = False
+    for raw_line in report_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "桶外摆检查" in line:
+            in_section = True
+            continue
+        if in_section and re.match(r"^[一二三四五六七八九十]+、", line):
+            break
+        if not in_section or "：" not in line:
+            continue
+        street_name, text = line.split("：", 1)
+        street_name = street_name.strip()
+        text = text.strip()
+        daily_text = normalize_outside_bucket_daily_text(street_name, text)
+        if not street_name or not daily_text:
+            continue
+        issues.append(
+            {
+                "street_name": street_name,
+                "street": street_name,
+                "text": text,
+                "clean_text": text,
+                "daily_text": daily_text,
+            }
+        )
+    return issues
+
+
+def _build_category_streets(
+    rows: list[Any],
+    category: str,
+    unit_kind: str,
+    outside_bucket_by_street: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
     by_street: OrderedDict[str, OrderedDict[str, list[Any]]] = OrderedDict()
     for row in rows:
         if getattr(row, "category", "") != category:
@@ -402,14 +740,10 @@ def _build_category_streets(rows: list[Any], category: str, unit_kind: str) -> l
     streets: list[dict[str, Any]] = []
     for street in _sort_streets(by_street):
         points = []
-        outside_bucket_issues = []
         for place, place_rows in by_street[street].items():
             issue_counts: OrderedDict[str, int] = OrderedDict()
             for row in place_rows:
                 issue_rows = normalize_issue(row, unit_kind)
-                if unit_kind == "residential" and _is_street_outside_bucket(row, issue_rows):
-                    outside_bucket_issues.append({"text": _format_outside_bucket_issue(row)})
-                    continue
                 for issue in issue_rows:
                     issue_counts[issue.label] = issue_counts.get(issue.label, 0) + issue.count
             points.append(
@@ -426,7 +760,11 @@ def _build_category_streets(rows: list[Any], category: str, unit_kind: str) -> l
                 "index_cn": _chinese_numeral(len(streets) + 1),
                 "name": street,
                 "points": points,
-                "outside_bucket_issues": _dedupe_issue_dicts(outside_bucket_issues),
+                "outside_bucket_issues": list((outside_bucket_by_street or {}).get(street, [])),
+                "outside_bucket_summary": make_outside_bucket_summary(
+                    street,
+                    (outside_bucket_by_street or {}).get(street, []),
+                ),
             }
         )
     return streets
@@ -434,13 +772,37 @@ def _build_category_streets(rows: list[Any], category: str, unit_kind: str) -> l
 
 def _residential_issue_mappings() -> list[tuple[str, tuple[str, ...]]]:
     return [
-        ("桶站周边不洁", (r"周边.*不洁", r"站外不洁", r"环境不洁")),
         ("桶站满冒", (r"满冒",)),
+        ("桶站周边不洁", (r"周边.*不洁", r"站外不洁", r"环境不洁")),
         ("高峰时段桶站未开盖", (r"(高峰|晚高峰).*未开盖", r"未开盖.*(高峰|晚高峰)")),
         ("居民自主投放不准确", (r"混投", r"投放不规范", r"投放不准确", r"投放错误")),
         ("站外摆桶", (r"站外摆桶", r"桶外摆", r"垃圾桶外摆")),
         ("无宣传氛围", (r"无宣传氛围", r"没有看到.*宣传")),
         ("无小区公示牌", (r"无小区公示牌", r"未见公示牌")),
+        ("无装修垃圾投放点", (r"装修垃圾投放点无", r"无装修垃圾投放点")),
+        ("大件垃圾投放点公示牌信息错误", (r"大件垃圾投放点公示牌信息错误",)),
+        ("大件垃圾投放点无大件垃圾托底上门回收信息", (r"大件垃圾投放点无大件垃圾托底上门回收信息", r"无大件垃圾托底上门回收信息")),
+        ("无大件垃圾投放点", (r"^大件垃圾投放点无$", r"无大件垃圾投放点")),
+        ("大件垃圾投放点未设置公示牌", (r"大件垃圾投放点未设置公示牌",)),
+        ("大件垃圾投放点未设置围挡或专门隔离区", (r"大件垃圾投放点未设置围挡或专门隔离区",)),
+        ("大件垃圾投放点地面未作硬化处理", (r"大件垃圾投放点地面未作硬化处理",)),
+        ("大件垃圾投放点附近道路运输车通行不便", (r"大件垃圾投放点附近道路运输车通行不便",)),
+        ("大件垃圾投放点大件垃圾未有序码放", (r"大件垃圾投放点大件垃圾未有序码放",)),
+        ("大件垃圾投放点周围存在环境卫生死角", (r"大件垃圾投放点周围存在环境卫生死角",)),
+        ("大件垃圾投放点小于6平米", (r"大件垃圾投放点小于6平米",)),
+        ("大件垃圾投放点内容不规范（灭火器材不合格）", (r"大件垃圾投放点内容不规范.*灭火器材不合格", r"大件垃圾投放点内容不规范.*无灭火器")),
+        ("大件垃圾投放点大件与装修或生活垃圾混放", (r"大件垃圾投放点大件与装修或生活垃圾混放",)),
+        ("装修垃圾投放点公示牌信息错误", (r"装修垃圾投放点公示牌信息错误",)),
+        ("装修垃圾投放点未设置公示牌", (r"装修垃圾投放点未设置公示牌",)),
+        ("装修垃圾投放点未设置围挡或专门隔离区", (r"装修垃圾投放点未设置围挡或专门隔离区",)),
+        ("装修垃圾投放点地面未作硬化处理", (r"装修垃圾投放点地面未作硬化处理",)),
+        ("装修垃圾投放点附近道路运输车通行不便", (r"装修垃圾投放点附近道路运输车通行不便",)),
+        ("装修垃圾投放点未袋装并有序码放", (r"装修垃圾投放点未袋装并有序码放",)),
+        ("装修垃圾投放点周边存在环境卫生死角", (r"装修垃圾投放点周边存在环境卫生死角",)),
+        ("装修垃圾投放点小于6平米", (r"装修垃圾投放点小于6平米",)),
+        ("装修垃圾投放点内容不规范（灭火器材不合格）", (r"装修垃圾投放点内容不规范.*灭火器材不合格", r"装修垃圾投放点内容不规范.*无灭火器")),
+        ("装修垃圾投放点装修与大件或生活垃圾混放", (r"装修垃圾投放点装修与大件或生活垃圾混放",)),
+        ("无装修垃圾备案", (r"无装修垃圾备案",)),
         ("无桶站", (r"无桶站", r"未见垃圾桶站")),
         ("散桶", (r"散桶",)),
         ("垃圾车混装混运", (r"垃圾车混装混运",)),
@@ -492,6 +854,20 @@ def _has_problem_keyword(text: str) -> bool:
             "无桶站",
             "散桶",
             "混装混运",
+            "信息错误",
+            "托底上门回收信息",
+            "未设置",
+            "未作硬化",
+            "通行不便",
+            "未有序",
+            "未袋装",
+            "卫生死角",
+            "小于6平米",
+            "灭火器材不合格",
+            "混放",
+            "无装修垃圾备案",
+            "无大件垃圾投放点",
+            "无装修垃圾投放点",
         )
     )
 
@@ -606,6 +982,54 @@ def _report_date_value(report_date: Any) -> date:
 
 def _format_cn_date(value: date) -> str:
     return f"{value.year}年{value.month}月{value.day}日"
+
+
+def _format_cn_date_range(start_value: date, end_value: date) -> str:
+    if start_value == end_value:
+        return _format_cn_date(start_value)
+    if start_value.year == end_value.year:
+        if start_value.month == end_value.month:
+            return f"{start_value.year}年{start_value.month}月{start_value.day}日-{end_value.day}日"
+        return f"{start_value.year}年{start_value.month}月{start_value.day}日-{end_value.month}月{end_value.day}日"
+    return f"{_format_cn_date(start_value)}-{_format_cn_date(end_value)}"
+
+
+def _special_check_date_range(rows: Iterable[Any], report_value: date) -> tuple[date, date]:
+    dates: list[date] = []
+    for row in rows:
+        if _clean_special_text(getattr(row, "category", "")) != SPECIAL_CHECK_CATEGORY:
+            continue
+        for value in (getattr(row, "created_time", ""), getattr(row, "report_time", "")):
+            parsed = _parse_datetime_text(_clean_time_source(value))
+            if parsed is not None:
+                dates.append(parsed.date())
+                break
+    if dates:
+        return min(dates), max(dates)
+    return report_value - timedelta(days=1), report_value
+
+
+def _special_check_topic(rows: Iterable[Any]) -> str:
+    issue_texts: list[str] = []
+    for row in rows:
+        if _clean_special_text(getattr(row, "category", "")) != SPECIAL_CHECK_CATEGORY:
+            continue
+        if not _is_special_check_problem_row(row):
+            continue
+        issue_texts.append(
+            "".join(
+                _clean_special_text(getattr(row, field, ""))
+                for field in ("indicator1", "indicator2", "indicator3", "problem")
+            )
+        )
+    combined = "".join(issue_texts)
+    if not combined:
+        return "桶站建设问题"
+    if any(keyword in combined for keyword in ("公示", "标识", "便利", "脚踏", "大件", "建设", "颜色", "电话")):
+        return "桶站建设问题"
+    if any(keyword in combined for keyword in ("满冒", "脏污", "破损", "周边不洁")):
+        return "桶站满冒脏污问题"
+    return "桶站建设问题"
 
 
 def _clean_special_text(value: object) -> str:

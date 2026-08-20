@@ -3,13 +3,17 @@
 import re
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
+
+try:
+    from workspace_temp import temporary_directory
+except ModuleNotFoundError:
+    from scripts.workspace_temp import temporary_directory
 
 
 IMAGE_WIDTH_CM = 10.2
@@ -50,7 +54,7 @@ def render_street_report_docx_from_docxtpl(
     from docxtpl import DocxTemplate, InlineImage
     from docx.shared import Cm
 
-    with TemporaryDirectory(prefix="daily_report_docxtpl_") as temp_dir:
+    with temporary_directory(prefix="daily_report_docxtpl_") as temp_dir:
         prepared_template = _prepare_docxtpl_template(
             template_path,
             Path(temp_dir) / "template.docx",
@@ -79,6 +83,8 @@ def render_street_report_docx_from_docxtpl(
                     field.name: convert(getattr(obj, field.name), width_cm, height_cm)
                     for field in fields(obj)
                 }
+                if hasattr(obj, "overall_items"):
+                    converted["overall_items"] = convert(getattr(obj, "overall_items"), width_cm, height_cm)
                 if hasattr(obj, "image_rows"):
                     converted["image_rows"] = convert(getattr(obj, "image_rows"), width_cm, height_cm)
                 if hasattr(obj, "images"):
@@ -149,10 +155,26 @@ def image_compression_profile(name: str | None) -> ImageCompressionProfile | Non
 def _prepare_docxtpl_template(template_path: Path, output_path: Path) -> Path:
     document = Document(str(template_path))
     _split_soft_break_paragraphs(document)
+    _ensure_community_intro_placeholder(document)
     _remove_template_instruction_tail(document)
     _drop_unmatched_jinja_control_paragraphs(document)
     document.save(str(output_path))
     return output_path
+
+
+def _ensure_community_intro_placeholder(document: Document) -> None:
+    intro_placeholder = "{{ community.overall_intro }}"
+    problem_placeholder = "{{ community.overall_problem_summary }}"
+    for paragraph in document.paragraphs:
+        text = paragraph.text
+        if problem_placeholder not in text or intro_placeholder in text:
+            continue
+        if "存在的问题是：" not in text:
+            continue
+        if paragraph.runs:
+            paragraph.runs[0].text = intro_placeholder + paragraph.runs[0].text
+        else:
+            paragraph.add_run(intro_placeholder)
 
 
 def _split_soft_break_paragraphs(document: Document) -> None:
@@ -383,7 +405,7 @@ def render_street_report_docx(
     document = Document()
     _set_document_styles(document)
 
-    with TemporaryDirectory(prefix="daily_report_images_") as temp_dir:
+    with temporary_directory(prefix="daily_report_images_") as temp_dir:
         image_cache = ImageCache(Path(temp_dir), image_compression=image_compression)
         if report.communities:
             _add_heading(document, "一、居住小区", level=1)
@@ -391,18 +413,28 @@ def render_street_report_docx(
             for community in report.communities:
                 _add_heading(document, f"（{community.index_cn}）{community.name}", level=2)
                 _add_heading(document, "1.小区整体情况", level=3)
-                _add_body(document, f"{community.overall_intro}存在的问题是：{community.overall_problem_summary}")
-                suffix = community.promo_text if community.promo_text and community.promo_text != "无问题" else ""
-                _add_body(document, f"小区宣传氛围：{suffix}")
-                _add_images(document, community.promo_images, image_cache)
-                _add_body(document, "小区公示牌：")
-                _add_images(document, community.notice_board_images, image_cache)
-
                 if community.is_pure_box_room:
-                    _add_body(document, "装修垃圾投放点设置：")
+                    _add_body(
+                        document,
+                        "该小区垃圾分类情况好的方面主要有：1.四类垃圾桶设置齐全，且容器完好、洁净；2.有开展垃圾分类宣传工作；3.站点指导员按时上岗；4.小区垃圾投放规范，无垃圾乱堆乱放、投放不规范等现象；5.厨余、可回收物和有害垃圾桶分类纯净；6.有装修垃圾和大件垃圾投放点并且规范。存在的问题是："
+                        f"{community.overall_problem_summary}",
+                    )
+                else:
+                    _add_body(document, f"{community.overall_intro}存在的问题是：{community.overall_problem_summary}")
+                promo_text = community.promo_text if community.promo_text != "无问题" else ""
+                notice_board_text = community.notice_board_text if community.notice_board_text != "无问题" else ""
+                _add_body(document, f"（1）小区宣传氛围：{promo_text}")
+                _add_images(document, community.promo_images, image_cache)
+                _add_body(document, f"（2）小区公示牌：{notice_board_text}")
+                _add_images(document, community.notice_board_images, image_cache)
+                if community.is_pure_box_room:
+                    _add_body(document, "（3）装修垃圾投放点设置")
                     _add_body(document, "预约收集，集中密闭运输。")
-                    _add_body(document, "大件垃圾投放点设置：")
+                    _add_body(document, "（4）大件垃圾投放点设置")
                     _add_body(document, "预约收集，集中密闭运输。")
+                if community.community_litter_text:
+                    _add_body(document, f"（5）小区垃圾乱堆乱放、投放不规范现象：{community.community_litter_text}")
+                    _add_images(document, community.community_litter_images, image_cache)
 
                 _add_heading(document, "2.桶站设置情况", level=3)
                 if community.stations:
@@ -505,8 +537,36 @@ def _render_outside_bucket_issues(
         if clean_text and not clean_text.endswith(("。", "；", ";", "！", "!", "?", "？")):
             clean_text += "。"
         _add_body(document, f"{street_name}：{clean_text}")
-        images = _get_issue_images(issue)
-        _add_images(document, images, image_cache, width_cm=7.21, height_cm=4.06)
+        image_rows = _get_issue_image_rows(issue)
+        if not image_rows:
+            image_rows = [_get_issue_images(issue)]
+        for row in image_rows:
+            if len(row) <= 1:
+                _add_images(document, row, image_cache, width_cm=7.21, height_cm=4.06)
+                continue
+            paragraph = document.add_paragraph()
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            first = paragraph.add_run()
+            try:
+                first.add_picture(
+                    str(image_cache.word_image_path(row[0])),
+                    width=Cm(7.21),
+                    height=Cm(4.06),
+                )
+            except Exception:
+                first.add_text(f"[图片无法插入：{Path(row[0]).name}]")
+            paragraph.add_run("\t")
+            second = paragraph.add_run()
+            try:
+                second.add_picture(
+                    str(image_cache.word_image_path(row[1])),
+                    width=Cm(7.21),
+                    height=Cm(4.06),
+                )
+            except Exception:
+                second.add_text(f"[图片无法插入：{Path(row[1]).name}]")
 
 
 def _get_issue_value(issue: Any, *names: str) -> str:
@@ -526,6 +586,17 @@ def _get_issue_images(issue: Any) -> list[Path]:
     else:
         images = getattr(issue, "image_paths", None) or getattr(issue, "images", None) or []
     return [Path(image) for image in images if image]
+
+
+def _get_issue_image_rows(issue: Any) -> list[list[Path]]:
+    if isinstance(issue, dict):
+        rows = issue.get("image_rows") or []
+    else:
+        rows = getattr(issue, "image_rows", None) or []
+    normalized: list[list[Path]] = []
+    for row in rows:
+        normalized.append([Path(image) for image in row if image])
+    return normalized
 
 
 def _set_document_styles(document: Document) -> None:

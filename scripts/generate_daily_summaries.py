@@ -41,7 +41,11 @@ def full_street_name(short_name: str) -> str:
 
 def clean_problem_number(text: str) -> str:
     text = text.strip()
-    text = re.sub(r"^[\uff08(]\d+[\uff09)]\s*", "", text)
+    while True:
+        cleaned = re.sub(r"^[\uff08(]\d+[\uff09)]\s*", "", text)
+        if cleaned == text:
+            break
+        text = cleaned.strip()
     return text.strip()
 
 
@@ -81,6 +85,8 @@ def is_no_problem_summary(text: str) -> bool:
 def clean_report_problem_item(text: str) -> str:
     text = clean_problem_number(text)
     text = text.strip("：:，,。；;、 ")
+    text = clean_problem_number(text)
+    text = text.strip("：:，,。；;、 ")
     return text
 
 
@@ -101,8 +107,48 @@ def count_real_problems(texts: list[str]) -> int:
     for text in texts:
         for segment in split_problem_segments(text):
             if is_real_problem(segment):
-                count += 1
+                count += problem_segment_count(segment)
     return count
+
+
+def problem_segment_count(text: str) -> int:
+    cleaned = clean_problem_number(text)
+    explicit_counts = [int(match) for match in re.findall(r"(\d+)\s*处", cleaned)]
+    explicit_counts.extend(_parse_chinese_count(value) for value in re.findall(r"([零〇一二两三四五六七八九十百]+)\s*处", cleaned))
+    explicit_counts = [value for value in explicit_counts if value is not None]
+    return max(explicit_counts) if explicit_counts else 1
+
+
+def _parse_chinese_count(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    mapping = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    if value in mapping:
+        return mapping[value]
+    if "百" in value:
+        left, right = value.split("百", 1)
+        hundred = mapping.get(left, 1 if not left else 0) * 100
+        return hundred + (_parse_chinese_count(right) or 0)
+    if value.startswith("十"):
+        return 10 + (_parse_chinese_count(value[1:]) or 0)
+    if "十" in value:
+        left, right = value.split("十", 1)
+        return mapping.get(left, 0) * 10 + (_parse_chinese_count(right) or 0)
+    return None
 
 
 def street_report_problem_map(street_report_paths: Iterable[tuple[str, Path]]) -> "OrderedDict[str, OrderedDict[str, str]]":
@@ -191,7 +237,6 @@ def extract_garbage_problem_texts_from_street_report(path: Path) -> "OrderedDict
     return OrderedDict(
         (place, _renumber_problem_items(items))
         for place, items in communities.items()
-        if items
     )
 
 
@@ -233,7 +278,55 @@ def _split_report_problem_items(text: str) -> list[str]:
 def _renumber_problem_items(items: list[str]) -> str:
     if not items:
         return "无问题"
-    return "；".join(f"（{index}）{item}" for index, item in enumerate(items, start=1)) + "。"
+    normalized_items = _drop_duplicate_station_items(
+        [_normalize_summary_problem_item(item) for item in items]
+    )
+    if not normalized_items:
+        return "无问题"
+    return "；".join(f"（{index}）{item}" for index, item in enumerate(normalized_items, start=1) if item) + "。"
+
+
+def _normalize_summary_problem_item(text: str) -> str:
+    value = clean_problem_number(text)
+    value = value.strip("：:，,。；;、 ")
+    value = clean_problem_number(value)
+    value = value.rstrip("。；;，,、 ")
+    return value.strip()
+
+
+def _drop_duplicate_station_items(items: list[str]) -> list[str]:
+    general_categories = {
+        _summary_problem_category(item)
+        for item in items
+        if not _is_station_summary_item(item)
+    }
+    result: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        if _is_station_summary_item(item) and _summary_problem_category(item) in general_categories:
+            continue
+        result.append(item)
+    return result
+
+
+def _is_station_summary_item(item: str) -> bool:
+    return bool(re.search(r"^[0-9A-Za-z一二三四五六七八九十]+号桶站设置情况：", item))
+
+
+def _summary_problem_category(item: str) -> str:
+    value = re.sub(r"^[0-9A-Za-z一二三四五六七八九十]+号桶站设置情况：", "", item)
+    value = re.sub(r"\d+处$", "", value)
+    value = value.removesuffix("一处").strip("：:，,。；;、 ")
+    if "周边" in value and "不洁" in value:
+        return "桶站周边不洁"
+    if "满冒" in value:
+        return "桶站满冒"
+    if "站外摆桶" in value or "桶外摆" in value or "垃圾桶外摆" in value:
+        return "站外摆桶"
+    if "破损" in value or "脏污" in value:
+        return "桶站破损、脏污"
+    return value
 
 
 def body_elements(document):
@@ -351,6 +444,21 @@ def write_garbage_summary(
     street_report_paths: list[tuple[str, Path]] | None = None,
     ledger_rows: list | None = None,
 ) -> Path:
+    if street_report_paths is not None and _template_has_jinja_tags(template_path):
+        try:
+            from garbage_daily_report import build_garbage_daily_context, render_garbage_daily_report
+        except ModuleNotFoundError:
+            from scripts.garbage_daily_report import build_garbage_daily_context, render_garbage_daily_report
+
+        if ledger_rows is not None:
+            context = build_garbage_daily_context(ledger_rows, report_date)
+            street_context = _summary_context_from_street_reports(street_report_paths, report_date)
+            context["residential_streets"] = street_context["residential_streets"]
+        else:
+            context = _summary_context_from_street_reports(street_report_paths, report_date)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{chinese_day_prefix(report_date)}{CN_GARBAGE_DAILY}.docx"
+        return render_garbage_daily_report(template_path.resolve(), context, output_path)
     if ledger_rows is not None:
         try:
             from garbage_daily_report import build_garbage_daily_context, render_garbage_daily_report
@@ -358,16 +466,6 @@ def write_garbage_summary(
             from scripts.garbage_daily_report import build_garbage_daily_context, render_garbage_daily_report
 
         context = build_garbage_daily_context(ledger_rows, report_date)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{chinese_day_prefix(report_date)}{CN_GARBAGE_DAILY}.docx"
-        return render_garbage_daily_report(template_path.resolve(), context, output_path)
-    if street_report_paths is not None and _template_has_jinja_tags(template_path):
-        try:
-            from garbage_daily_report import render_garbage_daily_report
-        except ModuleNotFoundError:
-            from scripts.garbage_daily_report import render_garbage_daily_report
-
-        context = _summary_context_from_street_reports(street_report_paths, report_date)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{chinese_day_prefix(report_date)}{CN_GARBAGE_DAILY}.docx"
         return render_garbage_daily_report(template_path.resolve(), context, output_path)
@@ -472,16 +570,8 @@ def write_daily_summary(
         except ModuleNotFoundError:
             raise
 
-        street_problem_map = street_report_problem_map(street_report_paths)
-        context = {
-            "report_date": report_date.value,
-            "report_date_text": report_date.chinese,
-            "street_count": len(street_report_paths),
-            "street_problem_counts": [
-                {"short_name": short_street_name(street), "problem_count": len(street_problem_map.get(street, {}))}
-                for street, _ in street_report_paths
-            ],
-        }
+        context = _summary_context_from_street_reports(street_report_paths, report_date)
+        context["street_problem_counts"] = _street_problem_counts_from_context(context)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{CN_DAILY_SUMMARY}({report_date.value.day}).docx"
         doc = DocxTemplate(str(template_path.resolve()))
@@ -606,10 +696,30 @@ def _template_has_jinja_tags(template_path: Path) -> bool:
 
 
 def _summary_context_from_street_reports(street_report_paths: list[tuple[str, Path]], report_date) -> dict:
+    try:
+        from garbage_daily_report import (
+            extract_all_text_from_docx,
+            group_outside_bucket_by_street,
+            make_outside_bucket_summary,
+            parse_outside_bucket_from_street_report_text,
+        )
+    except ModuleNotFoundError:
+        from scripts.garbage_daily_report import (
+            extract_all_text_from_docx,
+            group_outside_bucket_by_street,
+            make_outside_bucket_summary,
+            parse_outside_bucket_from_street_report_text,
+        )
+
     street_problem_map = street_report_problem_map(street_report_paths)
+    outside_bucket_issues = []
+    for _street, path in street_report_paths:
+        outside_bucket_issues.extend(parse_outside_bucket_from_street_report_text(extract_all_text_from_docx(path)))
+    outside_bucket_by_street = group_outside_bucket_by_street(outside_bucket_issues)
     residential_streets = []
     for index, (street, _) in enumerate(street_report_paths, start=1):
         places = street_problem_map.get(street, OrderedDict())
+        street_outside_bucket_issues = outside_bucket_by_street.get(street, [])
         residential_streets.append(
             {
                 "index_cn": chinese_numeral(index),
@@ -621,7 +731,8 @@ def _summary_context_from_street_reports(street_report_paths: list[tuple[str, Pa
                     }
                     for place_name, problem_text in places.items()
                 ],
-                "outside_bucket_issues": [],
+                "outside_bucket_issues": street_outside_bucket_issues,
+                "outside_bucket_summary": make_outside_bucket_summary(street, street_outside_bucket_issues),
             }
         )
 
@@ -661,8 +772,29 @@ def _summary_context_from_street_reports(street_report_paths: list[tuple[str, Pa
 def _street_problem_counts_from_context(context: dict) -> list[dict[str, int | str]]:
     counts: OrderedDict[str, int] = OrderedDict()
     for street in context.get("residential_streets", []):
-        counts[street["name"]] = sum(len(point.get("issues", [])) for point in street.get("points", []))
+        counts[street["name"]] = sum(
+            _issue_count(issue)
+            for point in street.get("points", [])
+            for issue in point.get("issues", [])
+        )
     return [
         {"short_name": short_street_name(street), "problem_count": count}
         for street, count in counts.items()
     ]
+
+
+def _issue_count(issue: dict) -> int:
+    value = issue.get("count")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    if isinstance(value, str):
+        parsed = _parse_chinese_count(value)
+        if parsed is not None:
+            return parsed
+    return problem_segment_count(str(issue.get("text", "")))
+
+
+def _count_street_problem_map_places(places: "OrderedDict[str, str]") -> int:
+    return sum(count_real_problems([problem_text]) for problem_text in places.values())

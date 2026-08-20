@@ -1,0 +1,38 @@
+<h2>最终简化版</h2>
+<p class="subtitle">只保留台账、模板、生成、日志。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Preview: 日报生成工具</div>
+  <div class="mockup-body">
+    <div style="max-width:720px;margin:0 auto;font-family:'Microsoft YaHei UI',sans-serif;color:#1f2937">
+      <div style="font-size:22px;font-weight:700;margin-bottom:4px">日报生成工具</div>
+      <div style="font-size:12px;color:#64748b;margin-bottom:18px">选择台账和日报模板后，点击生成即可。</div>
+
+      <div style="display:grid;gap:12px">
+        <div style="display:grid;grid-template-columns:72px 1fr 104px;gap:8px;align-items:center">
+          <div style="font-weight:600">台账</div>
+          <input class="mock-input" value="D:\pycharm\Daily-Word\input\20260603台账.xls">
+          <button class="mock-button">选择台账</button>
+        </div>
+        <div style="display:grid;grid-template-columns:72px 1fr 104px;gap:8px;align-items:center">
+          <div style="font-weight:600">模板</div>
+          <input class="mock-input" value="uploaded_template_20260604_145654.docx">
+          <button class="mock-button">选择模板</button>
+        </div>
+        <div>
+          <button class="mock-button">生成日报</button>
+        </div>
+        <div>
+          <div style="font-size:12px;color:#64748b;margin-bottom:6px">日志</div>
+          <div style="background:#111827;color:#d1d5db;border-radius:6px;padding:12px;height:180px;font-family:Consolas,monospace;font-size:12px;line-height:1.7">
+            [run] 台账: D:\pycharm\Daily-Word\input\20260603台账.xls<br>
+            [run] 模板: D:\pycharm\Daily-Word\input\uploaded_template.docx<br>
+            [run] rule_based_street_daily_reports ...<br>
+            [ok] streets: 15, written: 15<br>
+            [ok] 输出目录: D:\pycharm\Daily-Word\output
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

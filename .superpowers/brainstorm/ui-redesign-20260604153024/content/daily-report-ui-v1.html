@@ -1,0 +1,119 @@
+<h2>新版窗口方向：日报生成辅助系统</h2>
+<p class="subtitle">重点不是再做一个“一键生成表单”，而是把台账、模板、生成质量、人工修正串成一个可检查流程。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Preview: 主窗口草图</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:260px 1fr 320px;gap:14px;min-height:560px;font-family:'Microsoft YaHei UI',sans-serif;color:#1f2937">
+      <div style="border-right:1px solid #e5e7eb;padding-right:12px">
+        <div style="font-weight:700;font-size:18px;margin-bottom:12px">日报生成辅助系统</div>
+        <div style="display:grid;gap:8px">
+          <div style="background:#e8f1ff;border-left:4px solid #2563eb;padding:10px;border-radius:6px;font-weight:600">1 台账与模板</div>
+          <div style="background:#f8fafc;border-left:4px solid #cbd5e1;padding:10px;border-radius:6px">2 数据解析检查</div>
+          <div style="background:#f8fafc;border-left:4px solid #cbd5e1;padding:10px;border-radius:6px">3 内容草稿修订</div>
+          <div style="background:#f8fafc;border-left:4px solid #cbd5e1;padding:10px;border-radius:6px">4 生成与导出</div>
+        </div>
+        <div style="margin-top:22px;font-size:12px;color:#64748b;line-height:1.8">
+          当前目标：先生成可人工确认的草稿。<br>
+          系统提示：模板未识别字段 1 处；图片占位 41 处。
+        </div>
+      </div>
+
+      <div style="padding:0 4px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div>
+            <div style="font-size:20px;font-weight:700">台账与模板</div>
+            <div style="font-size:12px;color:#64748b;margin-top:3px">先确认输入文件，再进入解析预检。</div>
+          </div>
+          <button class="mock-button">开始预检</button>
+        </div>
+
+        <div style="display:grid;gap:10px">
+          <div style="border:1px solid #dbe3ef;border-radius:8px;padding:12px;background:#fff">
+            <div style="font-weight:600;margin-bottom:8px">台账文件</div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input class="mock-input" style="flex:1" value="D:\pycharm\Daily-Word\input\20260603台账.xls">
+              <button class="mock-button">选择</button>
+            </div>
+            <div style="margin-top:8px;font-size:12px;color:#64748b">预估：354 行，15 个街道，832 张嵌入图片。</div>
+          </div>
+
+          <div style="border:1px solid #dbe3ef;border-radius:8px;padding:12px;background:#fff">
+            <div style="font-weight:600;margin-bottom:8px">日报模板</div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input class="mock-input" style="flex:1" value="uploaded_template_20260604_145654.docx">
+              <button class="mock-button">上传</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:10px;font-size:12px">
+              <span style="background:#ecfdf5;color:#047857;padding:4px 8px;border-radius:999px">Jinja 模板</span>
+              <span style="background:#fff7ed;color:#c2410c;padding:4px 8px;border-radius:999px">存在孤立 endif，已自动忽略</span>
+            </div>
+          </div>
+
+          <div style="border:1px solid #dbe3ef;border-radius:8px;padding:12px;background:#fff">
+            <div style="font-weight:600;margin-bottom:8px">生成范围</div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="mock-button">全部街道</button>
+              <button class="mock-button">只生成选中街道</button>
+              <input class="mock-input" style="width:130px" value="6.3">
+            </div>
+            <div style="margin-top:10px;display:grid;grid-template-columns:repeat(5,1fr);gap:6px;font-size:12px">
+              <span style="padding:6px;background:#eff6ff;border-radius:6px;text-align:center">西长安街</span>
+              <span style="padding:6px;background:#f8fafc;border-radius:6px;text-align:center">月坛</span>
+              <span style="padding:6px;background:#f8fafc;border-radius:6px;text-align:center">大栅栏</span>
+              <span style="padding:6px;background:#f8fafc;border-radius:6px;text-align:center">德胜</span>
+              <span style="padding:6px;background:#f8fafc;border-radius:6px;text-align:center">更多...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="border-left:1px solid #e5e7eb;padding-left:12px">
+        <div style="font-weight:700;margin-bottom:10px">质量检查面板</div>
+        <div style="display:grid;gap:8px">
+          <div style="border:1px solid #bfdbfe;background:#eff6ff;border-radius:8px;padding:10px">
+            <div style="font-weight:600">图片位置</div>
+            <div style="font-size:12px;color:#475569;margin-top:4px">41 张图，41 个图片段落，没有挤在同一段。</div>
+          </div>
+          <div style="border:1px solid #fed7aa;background:#fff7ed;border-radius:8px;padding:10px">
+            <div style="font-weight:600">内容质量</div>
+            <div style="font-size:12px;color:#475569;margin-top:4px">纯箱房小区固定话术、问题汇总、桶站编号需要人工确认。</div>
+          </div>
+          <div style="border:1px solid #e2e8f0;background:#f8fafc;border-radius:8px;padding:10px">
+            <div style="font-weight:600">下一步建议</div>
+            <div style="font-size:12px;color:#475569;margin-top:4px">先预检单个街道，再批量导出全部街道。</div>
+          </div>
+        </div>
+        <div style="margin-top:16px">
+          <button class="mock-button" style="width:100%;margin-bottom:8px">预览西长安街草稿</button>
+          <button class="mock-button" style="width:100%">打开输出目录</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2>你更希望新版窗口偏哪种工作方式？</h2>
+<div class="options">
+  <div class="option" data-choice="workflow" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>流程式工作台</h3>
+      <p>按“输入文件 → 解析预检 → 草稿修订 → 导出”走，适合现在内容质量还需要人工把关的阶段。我推荐这个。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="dashboard" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>街道检查看板</h3>
+      <p>中心是 15 个街道的状态列表，适合批量任务很多、需要逐个点开检查。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="minimal" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>极简生成器</h3>
+      <p>仍保留少量输入框和运行日志，但视觉更干净。改动小，但不能解决“内容差时难检查”的核心问题。</p>
+    </div>
+  </div>
+</div>

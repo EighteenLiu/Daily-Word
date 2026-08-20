@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-import tempfile
+import shutil
 from pathlib import Path
 
 
@@ -91,7 +91,8 @@ def generate_reports(
         import extract_xls_structure as extract
         import generate_daily_summaries as summaries
         import split_street_daily_reports as split
-        from daily_report_builder import build_street_report, load_ledger_rows
+        from workspace_temp import temporary_directory
+        from daily_report_builder import build_street_report, extract_outside_bucket_issues, load_ledger_rows
         from daily_report_renderer import (
             render_street_report_docx,
             render_street_report_docx_from_docxtpl,
@@ -102,7 +103,8 @@ def generate_reports(
         from scripts import extract_xls_structure as extract
         from scripts import generate_daily_summaries as summaries
         from scripts import split_street_daily_reports as split
-        from scripts.daily_report_builder import build_street_report, load_ledger_rows
+        from scripts.workspace_temp import temporary_directory
+        from scripts.daily_report_builder import build_street_report, extract_outside_bucket_issues, load_ledger_rows
         from scripts.daily_report_renderer import (
             render_street_report_docx,
             render_street_report_docx_from_docxtpl,
@@ -118,6 +120,8 @@ def generate_reports(
     EXTRACT_DOCX_ROOT.mkdir(parents=True, exist_ok=True)
     xlsx = XLSX_ROOT / f"{source.stem}.xlsx"
     structured = EXTRACT_DOCX_ROOT / f"{source.stem}_\u7ed3\u6784\u5316\u63d0\u53d6_\u5408\u5e76\u7f16\u53f7.docx"
+    cleanup_files: list[Path] = []
+    cleanup_dirs: list[Path] = []
 
     extract_args = argparse.Namespace(
         input=source,
@@ -139,7 +143,7 @@ def generate_reports(
     if structured.exists() and not overwrite:
         raise FileExistsError(f"Output already exists. Use --overwrite: {structured}")
     image_source_path = source if source.suffix.lower() == ".xls" else None
-    with tempfile.TemporaryDirectory(prefix="xls_extract_images_") as temp:
+    with temporary_directory(prefix="xls_extract_images_") as temp:
         sheet_name, items, image_count = extract.extract_items(
             xlsx_path,
             None,
@@ -150,6 +154,13 @@ def generate_reports(
         if not items:
             raise RuntimeError("No problem rows were extracted. Check the header row and column names.")
         extract.write_docx(items, structured, source.name, sheet_name)
+    if source.suffix.lower() == ".xls" and _is_relative_to(xlsx_path.resolve(), XLSX_ROOT.resolve()):
+        cleanup_files.append(xlsx_path)
+        cleanup_dirs.append(xlsx_path.parent / "extracted_images" / source.stem)
+    elif source.suffix.lower() == ".xlsx":
+        cleanup_dirs.append(xlsx_path.parent / "extracted_images" / xlsx_path.stem)
+    if _is_relative_to(structured.resolve(), EXTRACT_DOCX_ROOT.resolve()):
+        cleanup_files.append(structured)
     embedded_count = sum(len(item.images) for item in items)
     print(f"[ok] xlsx: {xlsx_path}")
     print(f"[ok] docx: {structured}")
@@ -184,12 +195,16 @@ def generate_reports(
     rows = load_ledger_rows(xlsx_path, include_images=True, image_source_path=image_source_path)
     streets = _ordered_streets(rows)
     outside_bucket_items = []
-    outside_bucket_temp_dir: tempfile.TemporaryDirectory | None = None
-    if outside_bucket_path:
+    ledger_outside_bucket_items = extract_outside_bucket_issues(rows)
+    if ledger_outside_bucket_items:
+        image_total = sum(len(item.get("images", [])) for item in ledger_outside_bucket_items)
+        print(f"[ok] 台账桶外摆提取完成: 共识别 {len(ledger_outside_bucket_items)} 条问题, 图片 {image_total} 张")
+    outside_bucket_temp_dir = None
+    if outside_bucket_path and not ledger_outside_bucket_items:
         outside_bucket_path = outside_bucket_path.resolve()
         if not outside_bucket_path.exists():
             raise FileNotFoundError(f"Outside-bucket file does not exist: {outside_bucket_path}")
-        outside_bucket_temp_dir = tempfile.TemporaryDirectory(prefix="outside_bucket_images_")
+        outside_bucket_temp_dir = temporary_directory(prefix="outside_bucket_images_")
         print(f"[run] 桶外摆文件: {outside_bucket_path}")
         normalized_outside_bucket_path = ensure_outside_bucket_docx(
             outside_bucket_path,
@@ -201,6 +216,8 @@ def generate_reports(
         )
         image_total = sum(len(item.image_paths) for item in outside_bucket_items)
         print(f"[ok] 桶外摆解析完成: 共识别 {len(outside_bucket_items)} 条问题, 图片 {image_total} 张")
+    elif outside_bucket_path and ledger_outside_bucket_items:
+        print("[ok] 已从台账识别桶外摆专项记录，跳过旧桶外摆 Word 回退以避免重复输出")
     effective_template = (
         split.convert_template_to_docx(effective_template.resolve())
         if effective_template and effective_template.exists()
@@ -212,11 +229,19 @@ def generate_reports(
     try:
         for street in streets:
             report = build_street_report(rows, street)
-            outside_bucket_matches = filter_outside_bucket_items(outside_bucket_items, [street]) if outside_bucket_items else []
+            if ledger_outside_bucket_items:
+                outside_bucket_matches = [
+                    item for item in ledger_outside_bucket_items if str(item.get("street_name") or item.get("street") or "").strip() == street
+                ]
+            else:
+                outside_bucket_matches = filter_outside_bucket_items(outside_bucket_items, [street]) if outside_bucket_items else []
             if not any((report.communities, report.restaurants, report.social_units, outside_bucket_matches)):
                 continue
-            if outside_bucket_path:
-                matched_images = sum(len(item.image_paths) for item in outside_bucket_matches)
+            if outside_bucket_path or ledger_outside_bucket_items:
+                matched_images = sum(
+                    len(item.get("images", [])) if isinstance(item, dict) else len(item.image_paths)
+                    for item in outside_bucket_matches
+                )
                 print(f"[ok] 桶外摆匹配完成: {street} {len(outside_bucket_matches)} 条, 图片 {matched_images} 张")
                 if not outside_bucket_matches:
                     print(f"[warn] 未匹配到当前街道桶外摆问题: {street}")
@@ -277,7 +302,34 @@ def generate_reports(
         for path in written_summaries:
             print(f"[ok] summary: {path}")
 
+    cleanup_generated_intermediates(cleanup_files, cleanup_dirs)
+
     return 0
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def cleanup_generated_intermediates(files: list[Path], dirs: list[Path]) -> None:
+    for path in files:
+        try:
+            if path.exists():
+                path.unlink()
+                print(f"[clean] removed intermediate: {path}")
+        except PermissionError:
+            print(f"[warn] intermediate is occupied, cannot remove: {path}", file=sys.stderr)
+    for directory in dirs:
+        try:
+            if directory.exists():
+                shutil.rmtree(directory)
+                print(f"[clean] removed intermediate dir: {directory}")
+        except PermissionError:
+            print(f"[warn] intermediate dir is occupied, cannot remove: {directory}", file=sys.stderr)
 
 
 def _ordered_streets(rows) -> list[str]:
@@ -289,7 +341,13 @@ def _ordered_streets(rows) -> list[str]:
             continue
         seen.add(street)
         streets.append(street)
-    return streets
+    try:
+        from garbage_daily_report import CANONICAL_STREET_ORDER
+    except ModuleNotFoundError:
+        from scripts.garbage_daily_report import CANONICAL_STREET_ORDER
+
+    order = {street: index for index, street in enumerate(CANONICAL_STREET_ORDER)}
+    return sorted(streets, key=lambda street: (order.get(street, len(order)), street))
 
 
 def main() -> int:

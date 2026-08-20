@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 
 try:
-    from daily_report_builder import build_street_report, load_ledger_rows
+    from daily_report_builder import build_street_report, extract_outside_bucket_issues, load_ledger_rows
     from daily_report_renderer import render_street_report_docx, render_street_report_docx_from_docxtpl
     from convert_xls_to_xlsx import convert_with_excel
 except ModuleNotFoundError:
-    from scripts.daily_report_builder import build_street_report, load_ledger_rows
+    from scripts.daily_report_builder import build_street_report, extract_outside_bucket_issues, load_ledger_rows
     from scripts.daily_report_renderer import render_street_report_docx, render_street_report_docx_from_docxtpl
     from scripts.convert_xls_to_xlsx import convert_with_excel
 
@@ -47,13 +47,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    cleanup_paths: list[Path] = []
+    cleanup_dirs: list[Path] = []
     try:
         source = args.ledger.resolve()
-        ledger = prepare_ledger(args.ledger, args.output.parent)
+        ledger = prepare_ledger(args.ledger, args.output.parent, cleanup_paths, cleanup_dirs)
         image_source_path = source if source.suffix.lower() == ".xls" else None
         rows = load_ledger_rows(ledger, include_images=True, image_source_path=image_source_path)
         report = build_street_report(rows, args.street)
-        if not any((report.communities, report.restaurants, report.social_units)):
+        outside_bucket_issues = extract_outside_bucket_issues(rows, street_filter=args.street)
+        if not any((report.communities, report.restaurants, report.social_units, outside_bucket_issues)):
             raise RuntimeError(f"No report content found for street: {args.street}")
 
         template = normalize_template(args.template) if args.template else None
@@ -62,19 +65,31 @@ def main() -> int:
                 report=report,
                 template_path=template,
                 output_path=args.output,
+                outside_bucket_issues=outside_bucket_issues,
                 image_compression=args.image_compression,
             )
         else:
-            output = render_street_report_docx(report, args.output, image_compression=args.image_compression)
+            output = render_street_report_docx(
+                report,
+                args.output,
+                outside_bucket_issues=outside_bucket_issues,
+                image_compression=args.image_compression,
+            )
         
         print(f"[ok] output: {output}")
+        cleanup_intermediate_files(cleanup_paths, cleanup_dirs)
         return 0
     except Exception as exc:
         print(f"[fail] {exc}", file=sys.stderr)
         return 1
 
 
-def prepare_ledger(source: Path, output_dir: Path) -> Path:
+def prepare_ledger(
+    source: Path,
+    output_dir: Path,
+    cleanup_paths: list[Path] | None = None,
+    cleanup_dirs: list[Path] | None = None,
+) -> Path:
     source = source.resolve()
     if source.suffix.lower() == ".xlsx":
         return source
@@ -84,6 +99,11 @@ def prepare_ledger(source: Path, output_dir: Path) -> Path:
     ascii_xls, ascii_xlsx = intermediate_paths_for_source(source, output_dir)
     ascii_xls.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, ascii_xls)
+    if cleanup_paths is not None:
+        cleanup_paths.append(ascii_xls)
+        cleanup_paths.append(ascii_xlsx)
+    if cleanup_dirs is not None:
+        cleanup_dirs.append(ascii_xls.parent)
     if ascii_xlsx.exists() and ascii_xlsx.stat().st_mtime >= ascii_xls.stat().st_mtime:
         return ascii_xlsx
 
@@ -96,6 +116,23 @@ def prepare_ledger(source: Path, output_dir: Path) -> Path:
     if failures:
         raise RuntimeError("Failed to convert .xls to .xlsx. See Excel COM error above.")
     return ascii_xlsx
+
+
+def cleanup_intermediate_files(files: list[Path], dirs: list[Path]) -> None:
+    for path in files:
+        try:
+            if path.exists():
+                path.unlink()
+                print(f"[clean] removed intermediate: {path}")
+        except PermissionError:
+            print(f"[warn] intermediate is occupied, cannot remove: {path}", file=sys.stderr)
+    for directory in dirs:
+        try:
+            if directory.exists() and not any(directory.iterdir()):
+                directory.rmdir()
+                print(f"[clean] removed intermediate dir: {directory}")
+        except PermissionError:
+            print(f"[warn] intermediate dir is occupied, cannot remove: {directory}", file=sys.stderr)
 
 
 def intermediate_paths_for_source(source: Path, output_dir: Path) -> tuple[Path, Path]:

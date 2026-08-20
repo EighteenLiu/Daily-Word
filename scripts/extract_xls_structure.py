@@ -5,7 +5,6 @@ import bisect
 import hashlib
 import re
 import sys
-import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +12,11 @@ from typing import Iterable
 from xml.etree import ElementTree as ET
 
 from convert_xls_to_xlsx import convert_with_excel, temporary_excel_picture_compression_setting
+
+try:
+    from workspace_temp import temporary_directory
+except ModuleNotFoundError:
+    from scripts.workspace_temp import temporary_directory
 
 
 NS = {
@@ -139,35 +143,24 @@ def ensure_xlsx(args: argparse.Namespace) -> Path:
     if destination.exists() and not args.overwrite:
         return destination
 
+    target = destination
+    if destination.exists() and args.overwrite:
+        target = _next_available_xlsx_path(destination)
+        print(f"[warn] 保留已有 xlsx，改用新的分析副本: {target}")
+
     with temporary_excel_picture_compression_setting(
         enabled=not args.no_registry_protection,
         keep_setting=args.keep_registry_setting,
     ):
         failures = convert_with_excel(
-            jobs=[(source, destination)],
+            jobs=[(source, target)],
             overwrite=True,
             visible=args.visible,
             verify_media=True,
         )
-        if failures and _looks_like_locked_xlsx_failure(failures[0], destination):
-            fallback = _next_available_xlsx_path(destination)
-            print(f"[warn] 转换目标 xlsx 被占用，改用: {fallback}")
-            failures = convert_with_excel(
-                jobs=[(source, fallback)],
-                overwrite=True,
-                visible=args.visible,
-                verify_media=True,
-            )
-            if not failures:
-                return fallback
     if failures:
         raise RuntimeError("Failed to convert .xls to .xlsx. See Excel COM error above.")
-    return destination
-
-
-def _looks_like_locked_xlsx_failure(failure: object, destination: Path) -> bool:
-    text = str(failure)
-    return str(destination) in text and ("被占用" in text or "无法删除" in text or "Permission" in text)
+    return target
 
 
 def _next_available_xlsx_path(destination: Path) -> Path:
@@ -685,7 +678,7 @@ def main() -> int:
             raise FileExistsError(f"Output already exists. Use --overwrite: {output_path}")
 
         image_source_path = args.input.resolve() if args.input.suffix.lower() == ".xls" else None
-        with tempfile.TemporaryDirectory(prefix="xls_extract_images_") as temp:
+        with temporary_directory(prefix="xls_extract_images_") as temp:
             sheet_name, items, image_count = extract_items(
                 xlsx_path,
                 args.sheet,

@@ -1,0 +1,78 @@
+<h2>简化版窗口：上传解析生成</h2>
+<p class="subtitle">去掉复杂工作台，只保留最常用的输入、解析、生成和日志。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Preview: 简单上传解析窗口</div>
+  <div class="mockup-body">
+    <div style="width:760px;margin:0 auto;font-family:'Microsoft YaHei UI',sans-serif;color:#1f2937">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div>
+          <div style="font-size:22px;font-weight:700">日报生成工具</div>
+          <div style="font-size:12px;color:#64748b;margin-top:4px">上传台账和模板，解析后生成日报。</div>
+        </div>
+        <button class="mock-button">打开输出目录</button>
+      </div>
+
+      <div style="display:grid;gap:12px">
+        <div style="border:1px solid #dbe3ef;border-radius:8px;padding:14px;background:#fff">
+          <div style="font-weight:600;margin-bottom:8px">1. 上传台账</div>
+          <div style="display:flex;gap:8px">
+            <input class="mock-input" style="flex:1" value="D:\pycharm\Daily-Word\input\20260603台账.xls">
+            <button class="mock-button">选择台账</button>
+          </div>
+        </div>
+
+        <div style="border:1px solid #dbe3ef;border-radius:8px;padding:14px;background:#fff">
+          <div style="font-weight:600;margin-bottom:8px">2. 上传模板</div>
+          <div style="display:flex;gap:8px;margin-bottom:8px">
+            <input class="mock-input" style="flex:1" value="uploaded_template_20260604_145654.docx">
+            <button class="mock-button">选择日报模板</button>
+          </div>
+          <div style="display:flex;gap:8px">
+            <input class="mock-input" style="flex:1" value="每日总结模板，可留空">
+            <button class="mock-button">选择总结模板</button>
+          </div>
+        </div>
+
+        <div style="border:1px solid #dbe3ef;border-radius:8px;padding:14px;background:#fff">
+          <div style="font-weight:600;margin-bottom:8px">3. 解析设置</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input class="mock-input" style="width:120px" value="6.3">
+            <button class="mock-button">解析台账</button>
+            <button class="mock-button">生成日报</button>
+          </div>
+          <div style="margin-top:10px;font-size:12px;color:#64748b">
+            解析结果：15 个街道，354 行问题记录，832 张图片。图片将按模板里的 {{ image }} 位置插入。
+          </div>
+        </div>
+
+        <div style="border:1px solid #dbe3ef;border-radius:8px;padding:14px;background:#f8fafc">
+          <div style="font-weight:600;margin-bottom:8px">运行日志</div>
+          <div style="background:#111827;color:#d1d5db;border-radius:6px;padding:12px;height:150px;font-family:Consolas,monospace;font-size:12px;line-height:1.7">
+            [ready] 请选择台账和模板<br>
+            [ok] 解析完成：15 个街道<br>
+            [ok] 西长安街：41 张图片，41 个图片段落<br>
+            [done] 输出到 D:\pycharm\Daily-Word\output
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="simple-approved" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>就按这个简单版做</h3>
+      <p>只保留上传台账、上传模板、解析、生成、日志、打开输出目录。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="simpler" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要再简化</h3>
+      <p>只放台账、模板、生成按钮和日志，不单独做“解析台账”按钮。</p>
+    </div>
+  </div>
+</div>

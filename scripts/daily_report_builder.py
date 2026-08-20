@@ -9,6 +9,7 @@ import hashlib
 from io import BytesIO
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
 import xml.etree.ElementTree as ET
@@ -18,12 +19,14 @@ COMMUNITY_CATEGORY = "居住小区、平房胡同"
 RESTAURANT_CATEGORY = "餐饮单位"
 SOCIAL_UNIT_CATEGORY = "社会单位"
 FALLBACK_IMAGE_COLUMNS = set(range(8, 26))
+OUTSIDE_BUCKET_POINT = "厨余、其他垃圾桶外摆检查"
+OUTSIDE_BUCKET_PROBLEM_PHOTO_COLUMNS = set(range(8, 19))
 
 UNIT_INDICATOR_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
     RESTAURANT_CATEGORY: {
         "良好，未发现问题": (),
-        "宣传引导情况": ("无垃圾分类投放指引", "无四周年宣传海报", "无宣传氛围", "无适量点餐、光盘行动等宣传内容"),
-        "容器品类成组设置": ("后厨未成组设置垃圾桶", "无容器设置", "成组配置", "集中用餐区未成组设置厨余和其他垃圾容器数"),
+        "宣传引导情况": ("无垃圾分类投放指引", "无四周年宣传海报", "无宣传氛围", "无源头减量宣传（光盘行动）"),
+        "容器品类成组设置": ("后厨未成组设置垃圾桶", "无容器设置", "成组配置", "集中用餐区未成组设置容器"),
         "容器标识": ("良好，未发现问题", "容器标识不正确或无标识", "容器标识不清晰、破损", "容器颜色不正确"),
         "容器检查": ("容器垃圾不纯净", "良好，未发现问题", "投放点外表面明显脏污", "桶站破损、脏污", "桶站周边不洁", "桶站满冒", "站外摆桶"),
         "垃圾收运合同": ("无厨余垃圾收运合同或不合格", "无其他垃圾收运合同或不合格"),
@@ -45,11 +48,11 @@ UNIT_INDICATOR_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
     },
     SOCIAL_UNIT_CATEGORY: {
         "良好，未发现问题": (),
-        "宣传引导情况": ("有", "无", "无宣传氛围", "无适量点餐、光盘行动等宣传内容", "无四周年宣传海报"),
+        "宣传引导情况": ("有", "无", "无宣传氛围", "无源头减量宣传（光盘行动）", "无四周年宣传海报"),
         "无党建引领相关资料": (),
         "无培训活动、会议记录、照片等培训材料": (),
         "无四分类垃圾清运台账或四分类清运台账不合格": (),
-        "容器品类设置": ("单位无容器配置", "公共场所区域(办公楼外区域、办事大厅等)未成组设置可回收物和其他容器数（组数）", "集中用餐区未成组设置厨余和其他垃圾容器数", "食品加工区厨余、其他容器设置不齐", "成组配置", "未成组配置"),
+        "容器品类设置": ("单位无容器配置", "公共场所区域未成组设置可回收物和其他容器", "集中用餐区未成组设置厨余和其他容器", "食品加工区未成组设置厨余和其他容器", "成组配置", "未成组配置"),
         "容器标识": ("良好，未发现问题", "容器标识不正确", "容器标识不清晰、破损", "容器颜色不正确"),
         "投放点环境（容器检查）": ("良好，未发现问题", "投放点外表面明显脏污", "桶站破损、脏污", "桶站周边不洁", "桶站满冒", "站外摆桶"),
         "垃圾桶“游街”": ("有", "无"),
@@ -66,6 +69,20 @@ UNIT_INDICATOR_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
         "职责分工不明确": (),
         "无称重计量列表": (),
         "无油水分离装置": (),
+    },
+}
+
+UNIT_INDICATOR_ALIASES: dict[str, dict[str, str]] = {
+    RESTAURANT_CATEGORY: {
+        "宣传引导": "宣传引导情况",
+        "容器成组设置": "容器品类成组设置",
+        "油水分离装置": "无油水分离装置",
+    },
+    SOCIAL_UNIT_CATEGORY: {
+        "宣传引导": "宣传引导情况",
+        "容器成组设置": "容器品类设置",
+        "投放点环境": "投放点环境（容器检查）",
+        "油水分离装置": "无油水分离装置",
     },
 }
 
@@ -118,6 +135,63 @@ UNIT_GENERIC_PROBLEM_RESULTS_USE_PARENT = {"有", "是", "无"}
 UNIT_POSITIVE_RESULT_VALUES = {"有", "是", "已设置", "已配置", "已更新", "正常", "合格"}
 UNIT_NEGATIVE_RESULT_VALUES = {"无", "否", "未发现", "未提供"}
 UNIT_BAD_EVENT_INDICATOR_KEYWORDS = ("游街", "外摆", "乱堆乱放")
+PROBLEM_KEYWORDS = (
+    "不洁",
+    "不准确",
+    "站外摆桶",
+    "桶外摆",
+    "外摆",
+    "满冒",
+    "破损",
+    "脏污",
+    "不齐全",
+    "无宣传",
+    "未开盖",
+    "混投",
+    "散桶",
+)
+
+COMMUNITY_EXISTENCE_INDICATOR_PROBLEM_TEXT = {
+    "大件垃圾投放点": "无大件垃圾投放点",
+    "装修垃圾投放点": "无装修垃圾投放点",
+}
+COMMUNITY_SETTING_INDICATOR_SUFFIXES = {
+    "大件垃圾投放点设置": (
+        "公示牌信息错误",
+        "无大件垃圾托底上门回收信息",
+        "未设置公示牌",
+        "未设置围挡或专门隔离区",
+        "地面未作硬化处理",
+        "附近道路运输车通行不便",
+        "大件垃圾未有序码放",
+        "周围存在环境卫生死角",
+        "小于6平米",
+        "内容不规范（灭火器材不合格）",
+        "内容不规范（无灭火器）",
+        "大件与装修或生活垃圾混放",
+    ),
+    "装修垃圾投放点设置": (
+        "公示牌信息错误",
+        "未设置公示牌",
+        "未设置围挡或专门隔离区",
+        "地面未作硬化处理",
+        "附近道路运输车通行不便",
+        "未袋装并有序码放",
+        "周边存在环境卫生死角",
+        "小于6平米",
+        "内容不规范（灭火器材不合格）",
+        "内容不规范（无灭火器）",
+        "装修与大件或生活垃圾混放",
+        "无装修垃圾备案",
+    ),
+}
+COMMUNITY_SETTING_LEGACY_SUFFIX_ALIASES = {
+    "内容不规范（无灭火器）": "内容不规范（灭火器材不合格）",
+}
+NOTICE_BOARD_PREFIX_MAP = {
+    "小区公示牌": "小区公示牌",
+    "投放点公示牌": "投放点公示牌",
+}
 
 NS = {
     "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -141,6 +215,7 @@ class LedgerRow:
     image_paths: list[Path] = field(default_factory=list)
     created_time: str = ""
     report_time: str = ""
+    problem_image_paths_by_column: dict[int, list[Path]] = field(default_factory=dict)
 
 
 @dataclass
@@ -174,6 +249,14 @@ class ResidentDeliverySection:
 
 
 @dataclass
+class CommunityOverallItem:
+    index: int
+    title: str
+    text: str = ""
+    images: list[Path] = field(default_factory=list)
+
+
+@dataclass
 class CommunitySection:
     index_cn: str
     name: str
@@ -183,9 +266,36 @@ class CommunitySection:
     promo_text: str = ""
     notice_board_images: list[Path] = field(default_factory=list)
     notice_board_text: str = ""
+    community_litter_text: str = ""
+    community_litter_images: list[Path] = field(default_factory=list)
     is_pure_box_room: bool = False
     stations: list[StationSection] = field(default_factory=list)
     resident_delivery: ResidentDeliverySection | None = None
+
+    @property
+    def overall_items(self) -> list[CommunityOverallItem]:
+        items = [
+            CommunityOverallItem(
+                index=1,
+                title="小区宣传氛围",
+                text=self.promo_text if self.promo_text and self.promo_text != "无问题" else "",
+                images=self.promo_images,
+            ),
+            CommunityOverallItem(index=2, title="小区公示牌", images=self.notice_board_images),
+        ]
+        if self.community_litter_text:
+            items.append(
+                CommunityOverallItem(
+                    index=len(items) + 1,
+                    title="小区垃圾乱堆乱放、投放不规范现象",
+                    text=self.community_litter_text,
+                    images=self.community_litter_images,
+                )
+            )
+        if self.is_pure_box_room:
+            items.append(CommunityOverallItem(index=len(items) + 1, title="装修垃圾投放点设置", text="预约收集，集中密闭运输。"))
+            items.append(CommunityOverallItem(index=len(items) + 1, title="大件垃圾投放点设置", text="预约收集，集中密闭运输。"))
+        return items
 
 
 @dataclass
@@ -349,6 +459,108 @@ def _attach_row_images(rows: list[LedgerRow], images: Iterable[RowImage], image_
         output = image_root / f"row_{row.row_number}_{counters[row.row_number]}_{digest[:10]}{image.suffix}"
         output.write_bytes(image.data)
         row.image_paths.append(output)
+        row.problem_image_paths_by_column.setdefault(image.column_number, []).append(output)
+
+
+def is_outside_bucket_row(row: LedgerRow) -> bool:
+    return row.category.strip() == OUTSIDE_BUCKET_POINT
+
+
+def parse_report_date_value(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+    ):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def normalize_sentence(text: str) -> str:
+    text = str(text or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    text = " ".join(text.split()).strip()
+    if not text:
+        return ""
+    if text.endswith(("。", "！", "？", ";", "；")):
+        return text
+    return text + "。"
+
+
+def clean_outside_bucket_text(street_name: str, problem_text: str) -> str:
+    text = normalize_sentence(problem_text)
+    prefix = str(street_name or "").strip()
+    if prefix and text.startswith(prefix):
+        text = text[len(prefix) :].lstrip("，,：:、 ")
+    return normalize_sentence(text)
+
+
+def make_image_rows(images: list, per_row: int = 2) -> list[list]:
+    return [images[index : index + per_row] for index in range(0, len(images), per_row)]
+
+
+def _outside_bucket_problem_images(row: LedgerRow) -> list[Path]:
+    if not row.problem_image_paths_by_column:
+        return list(row.image_paths)
+    images: list[Path] = []
+    for column in sorted(row.problem_image_paths_by_column):
+        if column in OUTSIDE_BUCKET_PROBLEM_PHOTO_COLUMNS:
+            images.extend(row.problem_image_paths_by_column[column])
+    return images
+
+
+def extract_outside_bucket_issues(
+    rows: list[LedgerRow],
+    report_date: date | datetime | None = None,
+    street_filter: str | None = None,
+) -> list[dict[str, object]]:
+    target_date = report_date.date() if isinstance(report_date, datetime) else report_date
+    target_street = (street_filter or "").strip()
+    issues: list[dict[str, object]] = []
+
+    for row in rows:
+        if not is_outside_bucket_row(row):
+            continue
+        row_date = parse_report_date_value(row.created_time) or parse_report_date_value(row.report_time)
+        if target_date and row_date and row_date != target_date:
+            continue
+        street_name = row.street.strip()
+        if target_street and street_name != target_street:
+            continue
+        problem_text = row.problem.strip()
+        if not problem_text or normalize_text(problem_text) in {"无问题", "无"}:
+            continue
+        clean_text = clean_outside_bucket_text(street_name, problem_text)
+        if not clean_text:
+            continue
+        images = _outside_bucket_problem_images(row)
+        issues.append(
+            {
+                "street_name": street_name,
+                "street": street_name,
+                "text": normalize_sentence(problem_text),
+                "clean_text": clean_text,
+                "images": images,
+                "image_paths": images,
+                "image_rows": make_image_rows(images, 2),
+            }
+        )
+    return issues
 
 
 def extract_xls_original_row_images(xls_path: Path, xlsx_path: Path, sheet_name: str) -> list[RowImage]:
@@ -898,11 +1110,13 @@ def is_no_problem(text: str) -> bool:
     )
     if normalized.isdigit():
         return True
-    if normalized in {"有", "无", "五", "投放正确"}:
+    if normalized in {"有", "无", "五", "投放正确", "正常运行"}:
         return True
-    return any(marker in normalized for marker in no_problem_markers) and not any(
-        marker in normalized for marker in ("不洁", "不准确", "站外摆桶", "不齐全", "无宣传")
-    )
+    return any(marker in normalized for marker in no_problem_markers) and not _has_problem_keyword(normalized)
+
+
+def _has_problem_keyword(text: str) -> bool:
+    return any(marker in text for marker in PROBLEM_KEYWORDS)
 
 
 def clean_problem_text(text: str) -> str:
@@ -942,11 +1156,14 @@ def _is_inspection_count_text(text: str) -> bool:
 def effective_problem_text(row: LedgerRow) -> str:
     if _indicator3_overrides_problem_as_no_problem(row):
         return ""
+    community_problem = _community_indicator_problem_text(row)
+    if community_problem:
+        return community_problem
     problem = clean_problem_text(row.problem)
     indicator3 = clean_problem_text(row.indicator3)
     if "小区公示牌" in row.indicator2:
         return indicator3
-    if "小区宣传引导" in row.indicator2:
+    if "小区宣传引导" in row.indicator2 or row.indicator2 in {"宣传引导", "宣传引导情况"}:
         return indicator3
     if "居民自主投放" in row.indicator2 and (
         "投放错误" in row.problem
@@ -957,6 +1174,8 @@ def effective_problem_text(row: LedgerRow) -> str:
         return "居民自主投放不准确"
     if "宣传引导" in row.indicator2 and ("没有看到" in row.problem or "无宣传" in row.problem):
         return "无宣传氛围"
+    if is_no_problem(row.indicator3) and problem and _has_problem_keyword(problem):
+        return _canonical_problem_text(problem)
     if problem == "周边不洁" and "桶站周边不洁" in indicator3:
         return "桶站周边不洁"
     if problem.isdigit() and not indicator3.isdigit():
@@ -967,22 +1186,100 @@ def effective_problem_text(row: LedgerRow) -> str:
 def community_overall_problem_text(row: LedgerRow) -> str:
     if _indicator3_overrides_problem_as_no_problem(row):
         return ""
+    if _is_community_litter_row(row):
+        return COMMUNITY_LITTER_INDICATOR3
+    if _is_community_scattered_bin_row(row):
+        return COMMUNITY_SCATTERED_BIN_INDICATOR3
     if _is_resident_error(row):
         return "居民自主投放不准确"
+    community_problem = _community_indicator_problem_text(row)
+    if community_problem:
+        return community_problem
     indicator3_raw = display_text(row.indicator3)
+    problem = clean_problem_text(row.problem)
     if indicator3_raw and is_no_problem(indicator3_raw):
+        if problem and _has_problem_keyword(problem):
+            return _canonical_problem_text(problem)
         return ""
     indicator3 = clean_problem_text(row.indicator3)
+    if "小区公示牌" in row.indicator2:
+        return _prefixed_notice_board_problem(row.indicator2, indicator3)
     if indicator3:
         return indicator3
-    return clean_problem_text(row.problem)
+    return problem
+
+
+def _canonical_problem_text(problem: str) -> str:
+    if "周边" in problem and "不洁" in problem:
+        return "桶站周边不洁"
+    if "满冒" in problem:
+        return "桶站满冒"
+    if "站外摆桶" in problem or "桶外摆" in problem or "垃圾桶外摆" in problem:
+        return "站外摆桶"
+    if "破损" in problem or "脏污" in problem:
+        return "桶站破损、脏污"
+    return problem
+
+
+def _community_indicator_problem_text(row: LedgerRow) -> str:
+    indicator2 = display_text(row.indicator2).strip("：:，,。；;、 ")
+    indicator3 = display_text(row.indicator3).strip("：:，,。；;、 ")
+    problem = display_text(row.problem).strip("：:，,。；;、 ")
+    if indicator2 in COMMUNITY_EXISTENCE_INDICATOR_PROBLEM_TEXT:
+        if normalize_text(indicator3) == "无":
+            return COMMUNITY_EXISTENCE_INDICATOR_PROBLEM_TEXT[indicator2]
+        return ""
+    if indicator2 in COMMUNITY_SETTING_INDICATOR_SUFFIXES:
+        if is_no_problem(indicator3):
+            problem_text = _expanded_community_setting_problem(indicator2, problem)
+            return problem_text if problem_text else ""
+        return _expanded_community_setting_problem(indicator2, indicator3) or clean_problem_text(indicator3)
+    return ""
+
+
+def _expanded_community_setting_problem(indicator2: str, text: str) -> str:
+    text = display_text(text).strip("：:，,。；;、 ")
+    if not text:
+        return ""
+    if is_no_problem(text):
+        return ""
+    if indicator2 == "装修垃圾投放点设置" and "无装修垃圾备案" in text:
+        return "无装修垃圾备案"
+    for suffix in COMMUNITY_SETTING_INDICATOR_SUFFIXES.get(indicator2, ()):
+        expanded_suffix = COMMUNITY_SETTING_LEGACY_SUFFIX_ALIASES.get(suffix, suffix)
+        expanded = f"{indicator2[:-2]}{expanded_suffix}"
+        if text == suffix or text == expanded or suffix in text or expanded_suffix in text:
+            return expanded
+    return ""
+
+
+def _prefixed_notice_board_problem(indicator2: str, text: str) -> str:
+    text = clean_problem_text(text)
+    if not text:
+        return ""
+    for indicator_key, prefix in NOTICE_BOARD_PREFIX_MAP.items():
+        if indicator_key not in indicator2:
+            continue
+        if text.startswith(prefix):
+            return text
+        if text == "无公示牌":
+            return f"无{prefix}"
+        if text == "公示牌信息错误":
+            return f"{prefix}信息错误"
+        if text == "未设置公示牌":
+            return f"未设置{prefix}"
+        if text == "公示牌破损":
+            return f"{prefix}破损"
+        if text == "公示牌信息不准确":
+            return f"{prefix}信息不准确"
+    return text
 
 
 def _indicator3_overrides_problem_as_no_problem(row: LedgerRow) -> bool:
     indicator2 = display_text(row.indicator2)
     indicator3 = normalize_text(row.indicator3)
     return (
-        ("小区宣传引导" in indicator2 and indicator3 == "有宣传氛围")
+        ("宣传引导" in indicator2 and indicator3 == "有宣传氛围")
         or ("小区公示牌" in indicator2 and indicator3 in {"良好，未发现问题", "良好,未发现问题"})
         or (_is_resident_delivery_row(row) and indicator3 == "投放正确")
     )
@@ -1038,12 +1335,19 @@ def summarize_problem_rows(rows: Iterable[LedgerRow]) -> str:
             ordered.append(problem)
             counts[problem] = 0
         counts[problem] += _problem_weight(row, problem)
-    problems = [_format_problem_count(problem, counts[problem]) for problem in ordered]
+    problems = [_format_problem_count(problem, counts[problem]) for problem in _sort_community_problem_labels(ordered)]
     if not problems:
         return "无问题。"
     if len(problems) == 1:
         return f"（1）{problems[0]}。"
     return "；".join(f"（{index}）{problem}" for index, problem in enumerate(problems, start=1)) + "。"
+
+
+def _sort_community_problem_labels(labels: list[str]) -> list[str]:
+    order = {
+        "桶站满冒": 0,
+    }
+    return sorted(labels, key=lambda label: (order.get(label, len(order)), labels.index(label)))
 
 
 def _format_problem_count(problem: str, count: int) -> str:
@@ -1120,6 +1424,8 @@ def _build_communities(rows: list[LedgerRow]) -> list[CommunitySection]:
             promo_text=_indicator_problem_text(place_rows, "小区宣传"),
             notice_board_images=_images_for_indicator(place_rows, "小区公示牌"),
             notice_board_text=_notice_board_problem_text(place_rows),
+            community_litter_text=_community_litter_text(place_rows),
+            community_litter_images=_community_litter_images(place_rows),
             is_pure_box_room=is_pure_box_room,
             stations=_build_pure_box_station_sections(place_rows) if is_pure_box_room else _build_station_sections(place_rows),
             resident_delivery=_build_resident_delivery(place_rows),
@@ -1138,7 +1444,16 @@ def summarize_community_problem_rows(rows: Iterable[LedgerRow], prefer_station_i
     ordered: list[str] = []
     counts: dict[str, int] = {}
     for row in rows:
-        if not _is_resident_error(row) and is_no_problem(row.problem):
+        if (
+            not _is_resident_error(row)
+            and not _community_indicator_pair_defines_problem(row)
+            and is_no_problem(row.problem)
+            and (
+                is_no_problem(row.indicator3)
+                or not _is_station_problem_indicator_row(row)
+                or _is_explicit_no_problem_text(row.problem)
+            )
+        ):
             continue
         problem = community_overall_problem_text(row)
         if not problem:
@@ -1154,7 +1469,7 @@ def summarize_community_problem_rows(rows: Iterable[LedgerRow], prefer_station_i
             ordered.append(problem)
             counts[problem] = 0
         counts[problem] += _problem_weight(row, problem)
-    problems = [_format_problem_count(problem, counts[problem]) for problem in ordered]
+    problems = [_format_problem_count(problem, counts[problem]) for problem in _sort_community_problem_labels(ordered)]
     if not problems:
         return "无问题。"
     if len(problems) == 1:
@@ -1165,15 +1480,32 @@ def summarize_community_problem_rows(rows: Iterable[LedgerRow], prefer_station_i
 def _indicator3_can_define_problem(row: LedgerRow) -> bool:
     if "小区公示牌" in row.indicator2 and not is_no_problem(row.indicator3):
         return True
-    if "小区宣传引导" in row.indicator2 and not is_no_problem(row.indicator3):
+    if "宣传引导" in row.indicator2 and not is_no_problem(row.indicator3):
+        return True
+    if _is_community_scattered_bin_row(row):
         return True
     return False
+
+
+def _is_explicit_no_problem_text(text: str) -> bool:
+    normalized = normalize_text(text)
+    return normalized in {
+        "无",
+        "无问题",
+        "良好，未发现问题",
+        "良好,未发现问题",
+        "未发现问题",
+    }
+
+
+def _community_indicator_pair_defines_problem(row: LedgerRow) -> bool:
+    return bool(_community_indicator_problem_text(row))
 
 
 def _is_positive_indicator_result(row: LedgerRow) -> bool:
     return is_no_problem(row.indicator3) and not any(
         marker in row.problem
-        for marker in ("不", "无", "未", "外摆", "满冒", "混投", "散桶", "错误", "破损")
+        for marker in ("不", "无", "未", "外摆", "满冒", "混投", "错误", "破损")
     )
 
 
@@ -1185,12 +1517,62 @@ def _is_pure_box_room(place: str, rows: list[LedgerRow]) -> bool:
     )
 
 
+COMMUNITY_LITTER_INDICATOR2 = "小区内环境"
+COMMUNITY_LITTER_INDICATOR3 = "小区内有垃圾乱堆乱放、环境脏乱现象"
+COMMUNITY_SCATTERED_BIN_INDICATOR3 = "散桶"
+
+
+def _is_community_litter_row(row: LedgerRow) -> bool:
+    return (
+        display_text(row.indicator2) == COMMUNITY_LITTER_INDICATOR2
+        and display_text(row.indicator3) == COMMUNITY_LITTER_INDICATOR3
+        and not _community_litter_problem_says_no(row.problem)
+    )
+
+
+def _is_community_scattered_bin_row(row: LedgerRow) -> bool:
+    return (
+        display_text(row.indicator2) == COMMUNITY_LITTER_INDICATOR2
+        and display_text(row.indicator3) == COMMUNITY_SCATTERED_BIN_INDICATOR3
+    )
+
+
+def _community_litter_problem_says_no(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    return normalized in {"无", "无问题"} or any(
+        marker in normalized
+        for marker in ("未发现", "无乱堆乱放", "无垃圾乱堆乱放", "没有乱堆乱放", "没有垃圾乱堆乱放")
+    )
+
+
+def _community_litter_rows(rows: list[LedgerRow]) -> list[LedgerRow]:
+    return [row for row in rows if not _is_ignored_row(row) and _is_community_litter_row(row)]
+
+
+def _community_litter_text(rows: list[LedgerRow]) -> str:
+    return COMMUNITY_LITTER_INDICATOR3 if _community_litter_rows(rows) else ""
+
+
+def _community_litter_images(rows: list[LedgerRow]) -> list[Path]:
+    return _collect_images(_community_litter_rows(rows))
+
+
 def _build_station_sections(rows: list[LedgerRow]) -> list[StationSection]:
     rows = [row for row in rows if not _is_ignored_row(row)]
     station_rows = _station_rows_with_explicit_number(rows)
     if not station_rows:
         return _build_default_station_sections(rows)
-    return _build_station_sections_from_rows(station_rows, _non_resident_rows(rows))
+    sections = _build_station_sections_from_rows(station_rows, _non_resident_rows(rows))
+    unnumbered_rows = [
+        row
+        for row in _default_station_problem_rows(rows)
+        if row not in station_rows and not station_numbers_from_problem(row.problem)
+    ]
+    if unnumbered_rows:
+        _merge_rows_into_default_station_section(sections, unnumbered_rows, rows)
+    return sections
 
 
 def _is_station_setting_row(row: LedgerRow) -> bool:
@@ -1217,18 +1599,24 @@ def _is_station_problem_indicator_row(row: LedgerRow) -> bool:
 def _station_problem_indicator_keywords() -> tuple[str, ...]:
     return (
         "投放点环境",
+        "投放点环境（容器检查）",
+        "容器检查",
         "容器成组设置",
+        "容器品类成组设置",
+        "容器品类设置",
         "桶站便利性措施",
         "投放点公示牌",
         "早、晚高峰",
         "投放时段开盖",
         "灭蝇蚊、地面防滑设备",
         "灭蚊蝇、地面防滑设备",
+        "智能回收箱是否正常运行",
+        "收集车辆",
     )
 
 
 def _station_indicator_priority(row: LedgerRow) -> tuple[int, int]:
-    if "投放点环境" in display_text(row.indicator2):
+    if "投放点环境" in display_text(row.indicator2) or "容器检查" in display_text(row.indicator2):
         return (0, row.row_number)
     return (1, row.row_number)
 
@@ -1240,7 +1628,7 @@ def _build_default_station_sections(rows: list[LedgerRow]) -> list[StationSectio
             title="1号桶站设置情况",
             station_no="1",
             problem_summary=summarize_station_problem_rows(default_rows),
-            images=_collect_images(_default_station_image_rows(rows, default_rows)),
+            images=_collect_station_images("1", _default_station_image_rows(rows, default_rows)),
         )
     ]
 
@@ -1263,7 +1651,15 @@ def _default_station_image_rows(rows: list[LedgerRow], problem_rows: list[Ledger
 
 
 def _is_default_station_environment_row(row: LedgerRow) -> bool:
-    return "投放点环境" in display_text(row.indicator2)
+    indicator = display_text(row.indicator2)
+    return any(
+        keyword in indicator
+        for keyword in (
+            "投放点环境",
+            "智能回收箱是否正常运行",
+            "收集车辆",
+        )
+    )
 
 
 def _build_station_sections_from_rows(station_rows: list[LedgerRow], fallback_rows: list[LedgerRow]) -> list[StationSection]:
@@ -1274,7 +1670,7 @@ def _build_station_sections_from_rows(station_rows: list[LedgerRow], fallback_ro
     sections: list[StationSection] = []
     for station_no, group in grouped.items():
         summary = summarize_station_problem_rows(group)
-        images = _images_with_minimum(group, fallback_rows, minimum=3)
+        images = _images_with_minimum(station_no, group, fallback_rows, minimum=3)
         sections.append(
             StationSection(
                 title=f"{station_no}号桶站设置情况",
@@ -1284,6 +1680,46 @@ def _build_station_sections_from_rows(station_rows: list[LedgerRow], fallback_ro
             )
         )
     return _sort_station_sections(sections)
+
+
+def _merge_rows_into_default_station_section(
+    sections: list[StationSection],
+    rows: list[LedgerRow],
+    fallback_rows: list[LedgerRow],
+) -> None:
+    summary = summarize_station_problem_rows(rows)
+    if summary == "无问题":
+        return
+    target = next((section for section in sections if section.station_no == "1"), None)
+    if target is None:
+        sections.insert(
+            0,
+            StationSection(
+                title="1号桶站设置情况",
+                station_no="1",
+                problem_summary=summary,
+                images=_images_with_minimum("1", rows, fallback_rows, minimum=3),
+            ),
+        )
+        return
+    if target.problem_summary == "无问题":
+        target.problem_summary = summary
+    else:
+        target.problem_summary = "、".join(
+            part for part in (target.problem_summary, summary) if part and part != "无问题"
+        )
+    target.images = _dedupe_path_list(target.images + _images_with_minimum("1", rows, fallback_rows, minimum=3))
+
+
+def _dedupe_path_list(paths: list[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+    return result
 
 
 def _sort_station_sections(sections: list[StationSection]) -> list[StationSection]:
@@ -1320,7 +1756,7 @@ def _notice_board_problem_text(rows: list[LedgerRow]) -> str:
     for row in rows:
         if "小区公示牌" not in row.indicator2:
             continue
-        problem = clean_problem_text(row.indicator3)
+        problem = _prefixed_notice_board_problem(row.indicator2, row.indicator3)
         if not problem or problem in seen:
             continue
         seen.add(problem)
@@ -1360,11 +1796,19 @@ def station_problem_text_from_row(row: LedgerRow) -> str:
         return ""
     indicator3_raw = display_text(row.indicator3)
     if indicator3_raw and is_no_problem(indicator3_raw):
+        problem = clean_station_indicator_text(row.problem)
+        if problem and _has_problem_keyword(problem) and (
+            _is_station_problem_indicator_row(row) or station_numbers_from_problem(row.problem)
+        ):
+            return _canonical_problem_text(problem)
         return ""
     indicator3 = clean_station_indicator_text(row.indicator3)
     if indicator3:
-        return indicator3
-    return clean_station_indicator_text(effective_problem_text(row))
+        return _prefixed_notice_board_problem(row.indicator2, indicator3)
+    problem = clean_station_indicator_text(row.problem)
+    if problem:
+        return _prefixed_notice_board_problem(row.indicator2, problem)
+    return _prefixed_notice_board_problem(row.indicator2, clean_station_indicator_text(effective_problem_text(row)))
 
 
 def clean_station_indicator_text(text: str) -> str:
@@ -1397,7 +1841,7 @@ def station_numbers_from_problem(text: str) -> list[str]:
         group = match.group("group")
         for raw in re.split(separator, group):
             add_number(raw)
-    bare_number_ref = rf"^[（(]?\s*(?P<number>{_station_number_core_pattern()})\s*号\s*[）)]?\s*(?=无问题|周边|满冒|外摆|混投|散桶|不洁|未|无|有害|厨余|其他|可回收|桶|垃圾|公示牌|投放|破损)"
+    bare_number_ref = rf"^[（(]?\s*(?P<number>{_station_number_core_pattern()})\s*(?:号)?\s*[）)]?\s*(?=无问题|周边|满冒|外摆|混投|散桶|不洁|未|无|有害|厨余|其他|可回收|桶|垃圾|公示牌|投放|破损)"
     match = re.search(bare_number_ref, text)
     if match:
         add_number(match.group("number"))
@@ -1411,7 +1855,7 @@ def _strip_station_references(text: str) -> str:
     matches = list(re.finditer(station_ref, text))
     if matches:
         return text[matches[-1].end():]
-    bare_number_ref = rf"^[（(]?\s*{_station_number_core_pattern()}\s*号\s*[）)]?"
+    bare_number_ref = rf"^[（(]?\s*{_station_number_core_pattern()}\s*(?:号)?\s*[）)]?\s*(?=无问题|周边|满冒|外摆|混投|散桶|不洁|未|无|有害|厨余|其他|可回收|桶|垃圾|公示牌|投放|破损)"
     match = re.search(bare_number_ref, text)
     if match:
         return text[match.end():]
@@ -1423,7 +1867,10 @@ def _station_number_element_pattern() -> str:
 
 
 def _station_number_core_pattern() -> str:
-    return r"(?:0*\d+[A-Za-z]?|[一二三四五六七八九十]+[A-Za-z]?)"
+    arabic_part = r"0*\d+[A-Za-z]?"
+    hyphenated_arabic = rf"{arabic_part}(?:-{arabic_part})+"
+    chinese_part = r"[一二三四五六七八九十]+[A-Za-z]?"
+    return rf"(?:{hyphenated_arabic}|{arabic_part}|{chinese_part})"
 
 
 def _station_number_separator_pattern() -> str:
@@ -1431,6 +1878,8 @@ def _station_number_separator_pattern() -> str:
 
 
 def _normalize_station_no(station_no: str) -> str:
+    if "-" in station_no:
+        return "-".join(_normalize_station_no(part) for part in station_no.split("-") if part)
     match = re.fullmatch(r"0*(\d+)([A-Za-z]?)", station_no)
     if match:
         suffix = match.group(2).upper()
@@ -1497,6 +1946,8 @@ def _parse_count_token(token: str) -> int:
 def _is_resident_error(row: LedgerRow) -> bool:
     if _indicator3_overrides_problem_as_no_problem(row):
         return False
+    if not _is_resident_delivery_row(row):
+        return False
     return (
         "投放错误" in row.problem
         or "不准确" in row.problem
@@ -1545,7 +1996,7 @@ def summarize_unit_problem_rows(
 def unit_problem_text_from_row(row: LedgerRow, category: str) -> str:
     if _unit_row_is_no_problem(row, category):
         return ""
-    indicator2 = _unit_indicator_text(row.indicator2)
+    indicator2 = _unit_indicator_key(category, _unit_indicator_text(row.indicator2))
     indicator3 = _unit_indicator_text(row.indicator3)
     children = UNIT_INDICATOR_CHILDREN.get(category, {}).get(indicator2)
 
@@ -1568,7 +2019,7 @@ def unit_problem_text_from_row(row: LedgerRow, category: str) -> str:
 
 
 def _unit_row_is_no_problem(row: LedgerRow, category: str) -> bool:
-    indicator2 = _unit_indicator_text(row.indicator2)
+    indicator2 = _unit_indicator_key(category, _unit_indicator_text(row.indicator2))
     indicator3 = _unit_indicator_text(row.indicator3)
     if indicator2 in UNIT_IGNORED_INDICATORS.get(category, set()):
         return True
@@ -1631,6 +2082,10 @@ def _unit_indicator_text(value: object) -> str:
     return display_text(value).strip("：:，,。；;、 ")
 
 
+def _unit_indicator_key(category: str, indicator2: str) -> str:
+    return UNIT_INDICATOR_ALIASES.get(category, {}).get(indicator2, indicator2)
+
+
 def _unit_child_problem_from_text(category: str, indicator2: str, text: str) -> str:
     text = display_text(text)
     for child in UNIT_INDICATOR_CHILDREN.get(category, {}).get(indicator2, ()):
@@ -1673,7 +2128,7 @@ def _build_units(rows: list[LedgerRow], category: str) -> list[UnitSection]:
                 )
             )
             continue
-        promo_rows = [row for row in place_rows if row.indicator2 == "宣传引导情况"]
+        promo_rows = [row for row in place_rows if "宣传引导" in row.indicator2]
         container_rows = [row for row in place_rows if "容器" in row.indicator2 or "容器" in row.indicator3]
         if not container_rows:
             container_rows = [row for row in place_rows if row.image_paths]
@@ -1728,13 +2183,41 @@ def _collect_images(rows: Iterable[LedgerRow]) -> list[Path]:
     return _unique_images(images)
 
 
-def _images_with_minimum(primary_rows: Iterable[LedgerRow], fallback_rows: Iterable[LedgerRow], minimum: int) -> list[Path]:
-    primary_images = _collect_images(primary_rows)
+def _images_with_minimum(
+    station_no: str,
+    primary_rows: Iterable[LedgerRow],
+    fallback_rows: Iterable[LedgerRow],
+    minimum: int,
+) -> list[Path]:
+    primary_images = _collect_station_images(station_no, primary_rows)
     return primary_images
 
 
+def _collect_station_images(station_no: str, rows: Iterable[LedgerRow]) -> list[Path]:
+    seen_first_images: set[str] = set()
+    images: list[Path] = []
+    for row in rows:
+        row_images = list(row.image_paths)
+        if not row_images:
+            continue
+        first_key = _image_identity(row_images[0])
+        if first_key in seen_first_images:
+            row_images = row_images[1:]
+        else:
+            seen_first_images.add(first_key)
+        images.extend(row_images)
+    return _unique_images(images)
+
+
+def _image_identity(image: Path) -> str:
+    try:
+        return f"sha1:{hashlib.sha1(image.read_bytes()).hexdigest()}"
+    except OSError:
+        return f"path:{Path(image)}"
+
+
 def _attach_unassigned_community_images(section: CommunitySection, rows: list[LedgerRow]) -> None:
-    assigned = section.promo_images + section.notice_board_images
+    assigned = section.promo_images + section.notice_board_images + section.community_litter_images
     for station in section.stations:
         assigned.extend(station.images)
     if section.resident_delivery:
@@ -1758,7 +2241,12 @@ def _attach_unassigned_community_images(section: CommunitySection, rows: list[Le
 
 
 def _remaining_images(rows: Iterable[LedgerRow], assigned: Iterable[Path]) -> list[Path]:
-    return _collect_images(rows)
+    assigned_keys = {_image_identity(image) for image in assigned}
+    remaining: list[Path] = []
+    for image in _collect_images(rows):
+        if _image_identity(image) not in assigned_keys:
+            remaining.append(image)
+    return remaining
 
 
 def _unique_images(images: Iterable[Path]) -> list[Path]:
